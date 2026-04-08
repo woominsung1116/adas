@@ -1,4 +1,8 @@
-﻿from unittest.mock import MagicMock
+﻿import pytest
+
+pytest.importorskip("gymnasium")
+
+from unittest.mock import MagicMock
 
 from src.agent.baselines import RuleBasedAgent
 from src.simulation.classroom_world import ClassroomWorld

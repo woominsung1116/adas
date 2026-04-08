@@ -1,7 +1,10 @@
 import pytest
+
+gymnasium = pytest.importorskip("gymnasium")
+gym = gymnasium
+
 import numpy as np
 from unittest.mock import MagicMock
-import gymnasium as gym
 from src.environment.child_env import ADHDChildEnv
 from src.environment.child_profiles import ChildProfile
 from src.environment.scenarios import Scenario

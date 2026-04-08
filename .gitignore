@@ -14,3 +14,14 @@ SB3-*/
 .omc/
 
 results/
+
+# Electron / Node
+app/node_modules/
+app/renderer/node_modules/
+app/renderer/dist/
+
+# External datasets (too large for git)
+data/external/hyperaktiv/
+data/external/obf_psychiatric/
+data/external/scb_dataset/
+data/external/nsch/

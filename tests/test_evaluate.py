@@ -1,4 +1,7 @@
 import pytest
+
+pytest.importorskip("gymnasium")
+
 import numpy as np
 from unittest.mock import MagicMock
 from evaluate import evaluate_agent

@@ -1,6 +1,9 @@
 import pytest
+from pathlib import Path
 from src.environment.child_profiles import ChildProfile, load_profiles
 from src.environment.scenarios import Scenario, load_scenarios
+
+_ADAS_ROOT = Path(__file__).parent.parent
 
 
 def test_child_profile_fields():
@@ -81,7 +84,7 @@ def test_profile_severity_values():
 
 
 def test_loaded_profiles_have_literature_metadata():
-    profiles = load_profiles("data/profiles/adhd_profiles.yaml")
+    profiles = load_profiles(str(_ADAS_ROOT / "data/profiles/adhd_profiles.yaml"))
     assert profiles
     for profile in profiles:
         assert profile.evidence
@@ -92,7 +95,7 @@ def test_loaded_profiles_have_literature_metadata():
 
 
 def test_loaded_scenarios_have_literature_metadata():
-    scenarios = load_scenarios("data/scenarios/task_transitions.yaml")
+    scenarios = load_scenarios(str(_ADAS_ROOT / "data/scenarios/task_transitions.yaml"))
     assert scenarios
     for scenario in scenarios:
         assert scenario.evidence

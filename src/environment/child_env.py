@@ -1,4 +1,6 @@
-﻿import gymnasium as gym
+from __future__ import annotations
+
+import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 from src.llm.backend import LLMBackend

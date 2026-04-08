@@ -1,0 +1,52 @@
+{
+  "name": "adas",
+  "version": "0.1.0",
+  "description": "ADHD Classroom Behavioral Simulation - Desktop App",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:renderer\" \"wait-on http://localhost:5173 && npm run dev:electron\"",
+    "dev:renderer": "cd renderer && npx vite",
+    "dev:electron": "electron .",
+    "build": "cd renderer && npx vite build && electron-builder",
+    "preview": "cd renderer && npx vite preview"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.0.0",
+    "concurrently": "^9.0.0",
+    "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "com.adas.simulation",
+    "productName": "ADAS",
+    "files": [
+      "electron/**/*",
+      "renderer/dist/**/*",
+      "backend/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../src",
+        "to": "python/src"
+      },
+      {
+        "from": "../data",
+        "to": "python/data"
+      },
+      {
+        "from": "../configs",
+        "to": "python/configs"
+      },
+      {
+        "from": "backend",
+        "to": "backend"
+      }
+    ],
+    "mac": {
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

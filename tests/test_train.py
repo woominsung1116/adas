@@ -1,4 +1,7 @@
 import pytest
+
+pytest.importorskip("gymnasium")
+
 from unittest.mock import MagicMock
 from train import load_config, build_env
 
