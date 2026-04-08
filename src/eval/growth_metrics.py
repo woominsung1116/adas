@@ -38,6 +38,11 @@ class ClassMetrics:
     behavior_improvement_rates: list[float] = field(default_factory=list)
     n_managed: int = 0                   # ADHD students successfully managed
     class_completion_turn: int = 0       # total turns when class ended
+    # Per-category breakdown for Macro-F1
+    adhd_tp: int = 0
+    adhd_fp: int = 0
+    adhd_fn: int = 0
+    confounder_fp: int = 0               # normal students with confounding profiles wrongly identified
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +213,91 @@ class GrowthTracker:
         records = self._select(class_id)
         turns = [r.avg_care_turns for r in records if r.avg_care_turns > 0]
         return sum(turns) / len(turns) if turns else 0.0
+
+    def auprc(self, class_id: Optional[int] = None) -> float:
+        """Area Under Precision-Recall Curve.
+
+        Approximated from per-class precision/recall points since we don't
+        have continuous scores. We use the discrete identification decisions
+        across classes as threshold-like operating points and compute
+        trapezoidal area under the resulting curve.
+        """
+        if not self.class_history:
+            return 0.0
+
+        # Collect (recall, precision) points from each class
+        points: list[tuple[float, float]] = []
+        for record in self.class_history:
+            if class_id is not None and record.class_id != class_id:
+                continue
+            tp = record.true_positives
+            fp = record.false_positives
+            fn = record.false_negatives
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            points.append((recall, precision))
+
+        if not points:
+            return 0.0
+
+        # Add origin point (recall=0, precision=1) for proper curve
+        points.append((0.0, 1.0))
+        # Sort by recall ascending
+        points.sort(key=lambda p: (p[0], -p[1]))
+
+        # Trapezoidal approximation
+        area = 0.0
+        for i in range(1, len(points)):
+            r_prev, p_prev = points[i - 1]
+            r_curr, p_curr = points[i]
+            area += (r_curr - r_prev) * (p_prev + p_curr) / 2.0
+        return area
+
+    def macro_f1(self, class_id: Optional[int] = None) -> float:
+        """Macro-averaged F1 across 3 categories: normal, ADHD, confounder.
+
+        Uses per-category TP/FP/FN from ClassMetrics to compute F1 for
+        each category, then averages them. Confounder category uses
+        confounder_fp as false positives specific to confounding profiles.
+        """
+        records = self._select(class_id)
+        if not records:
+            return 0.0
+
+        # Aggregate per-category counts
+        adhd_tp = sum(r.adhd_tp for r in records)
+        adhd_fp = sum(r.adhd_fp for r in records)
+        adhd_fn = sum(r.adhd_fn for r in records)
+
+        # Normal category: TP = true negatives, FP = false negatives (missed ADHD
+        # students are "false positives" from the normal category's perspective),
+        # FN = false positives (normal students wrongly called ADHD)
+        normal_tp = sum(r.true_negatives for r in records)
+        normal_fp = sum(r.false_negatives for r in records)
+        normal_fn = sum(r.false_positives for r in records)
+
+        # Confounder category: confounder_fp are normal-with-confounding-traits
+        # students that were wrongly identified. This is a subset of FP.
+        confounder_fp = sum(r.confounder_fp for r in records)
+        # Confounder TP would require knowing ground-truth confounder labels.
+        # We approximate: confounder students that were NOT identified = "TP"
+        # from a "correctly left alone" perspective. Since we don't track
+        # total confounders, use what we have.
+        confounder_tp = 0  # no confirmed-correct confounder rejections tracked
+        confounder_fn = confounder_fp  # each wrongly identified confounder is a miss
+
+        def _f1(tp: int, fp: int, fn: int) -> float:
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            denom = precision + recall
+            return 2 * precision * recall / denom if denom > 0 else 0.0
+
+        f1_adhd = _f1(adhd_tp, adhd_fp, adhd_fn)
+        f1_normal = _f1(normal_tp, normal_fp, normal_fn)
+        f1_confounder = _f1(confounder_tp, confounder_fp, confounder_fn)
+
+        # Macro average: equal weight per category
+        return (f1_adhd + f1_normal + f1_confounder) / 3.0
 
     # ------------------------------------------------------------------
     # Growth curves (per-class time series)

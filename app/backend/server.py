@@ -482,6 +482,8 @@ async def _run_multi_student_session(ws, msg, profiles, scenarios):
                         "specificity": round(growth_tracker.specificity(), 4),
                         "f1": round(growth_tracker.f1(), 4),
                         "ppv": round(growth_tracker.ppv(), 4),
+                        "auprc": round(growth_tracker.auprc(), 4),
+                        "macro_f1": round(growth_tracker.macro_f1(), 4),
                     }
                 except Exception:
                     pass
@@ -652,7 +654,9 @@ async def _run_v2_session(ws, msg):
                 "location": event.get("location", "classroom"),
                 "students": event.get("students", []),
                 "teacher_action": event.get("teacher_action", {}),
-                "interactions": event.get("interactions", 0),
+                # Structured interaction array from orchestrator
+                # Each item: {actor, target, event_type, content}
+                "interactions": event.get("interactions", []),
                 "managed_count": sum(
                     1 for st in event.get("students", []) if st.get("is_managed")
                 ),
@@ -681,6 +685,23 @@ async def _run_v2_session(ws, msg):
                     "is_correct": rpt.is_correct,
                 })
 
+            # Build growth payload for v2 (mirrors multi mode)
+            growth_tracker = _get_growth_tracker()
+            v2_growth_payload = {}
+            if growth_tracker is not None and growth_tracker.total_classes_completed > 0:
+                try:
+                    v2_growth_payload = {
+                        "total_classes": growth_tracker.total_classes_completed,
+                        "sensitivity": round(growth_tracker.sensitivity(), 4),
+                        "specificity": round(growth_tracker.specificity(), 4),
+                        "f1": round(growth_tracker.f1(), 4),
+                        "ppv": round(growth_tracker.ppv(), 4),
+                        "auprc": round(growth_tracker.auprc(), 4),
+                        "macro_f1": round(growth_tracker.macro_f1(), 4),
+                    }
+                except Exception:
+                    pass
+
             await ws.send_json({
                 "type": "class_complete",
                 "class_id": env.class_id,
@@ -693,6 +714,7 @@ async def _run_v2_session(ws, msg):
                 "avg_identification_turn": round(metrics.avg_identification_turn, 2),
                 "strategies_used": metrics.strategies_used,
                 "reports": serialized_reports,
+                "growth": v2_growth_payload,
             })
 
     finally:

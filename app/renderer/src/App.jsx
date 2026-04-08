@@ -19,7 +19,7 @@ export default function App() {
   // Mode
   const [mode, setMode] = useState("classic");
 
-  // Multi-mode state
+  // Multi-mode state (shared by multi + v2)
   const [students, setStudents] = useState([]);
   const [classId, setClassId] = useState(null);
   const [latestTurn, setLatestTurn] = useState(null);
@@ -31,6 +31,14 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [speed, setSpeed] = useState(1.0);
   const [activeScenario, setActiveScenario] = useState(null);
+
+  // V2-specific state
+  const [v2Day, setV2Day] = useState(1);
+  const [v2Period, setV2Period] = useState(1);
+  const [v2Subject, setV2Subject] = useState("");
+  const [v2Location, setV2Location] = useState("classroom");
+  const [v2MaxTurns, setV2MaxTurns] = useState(950);
+  const [v2Archetype, setV2Archetype] = useState("");
 
   const wsRef = useRef(null);
 
@@ -72,6 +80,13 @@ export default function App() {
           setTeacherAction(null);
           setLatestTurn(null);
           setEvents((prev) => [...prev, data]);
+          // V2 fields
+          if (data.max_turns) setV2MaxTurns(data.max_turns);
+          if (data.archetype) setV2Archetype(data.archetype);
+          setV2Day(1);
+          setV2Period(1);
+          setV2Subject("");
+          setV2Location("classroom");
           break;
 
         case "turn": {
@@ -83,6 +98,11 @@ export default function App() {
           setIdentifiedCount(studentList.filter((s) => s.is_identified).length);
           setLatestTurn(data);
           setEvents((prev) => [...prev, data]);
+          // V2 fields
+          if (data.day != null) setV2Day(data.day);
+          if (data.period != null) setV2Period(data.period);
+          if (data.subject != null) setV2Subject(data.subject);
+          if (data.location != null) setV2Location(data.location);
           break;
         }
 
@@ -98,14 +118,22 @@ export default function App() {
                 specificity: g.specificity,
                 f1: g.f1,
                 ppv: g.ppv,
+                auprc: g.auprc ?? null,
+                macro_f1: g.macro_f1 ?? null,
                 history: {
                   sensitivity: [...(history.sensitivity || []), g.sensitivity],
                   specificity: [...(history.specificity || []), g.specificity],
                   f1: [...(history.f1 || []), g.f1],
                   ppv: [...(history.ppv || []), g.ppv],
+                  auprc: [...(history.auprc || []), g.auprc ?? null],
+                  macro_f1: [...(history.macro_f1 || []), g.macro_f1 ?? null],
                 },
               };
             });
+          }
+          // V2 class_complete may have metrics directly (no growth wrapper)
+          if (mode === "v2" && !data.growth && data.identified_count != null) {
+            setRunning(false);
           }
           break;
 
@@ -149,7 +177,9 @@ export default function App() {
     setRunning(true);
     setActiveScenario(scenario || null);
 
-    if (mode === "multi") {
+    if (mode === "v2") {
+      send({ type: "start_session", mode: "v2", n_students: 20 });
+    } else if (mode === "multi") {
       send({ type: "start_session", mode: "multi", n_students: 20, adhd_prevalence: 0.09 });
     } else {
       send({ type: "start_session", mode: "classic", profile, scenario });
@@ -180,6 +210,11 @@ export default function App() {
     setClassId(null);
     setLatestTurn(null);
     setTeacherAction(null);
+    setV2Day(1);
+    setV2Period(1);
+    setV2Subject("");
+    setV2Location("classroom");
+    setV2Archetype("");
   };
 
   // Focused student for StatePanel (the one teacher is acting on)
@@ -193,9 +228,19 @@ export default function App() {
     identifiedCount,
     managedCount,
     totalAdhd,
+    v2Info: mode === "v2" ? v2Info : null,
   };
 
-  const isMulti = mode === "multi";
+  const isMulti = mode === "multi" || mode === "v2";
+
+  const v2Info = {
+    day: v2Day,
+    period: v2Period,
+    subject: v2Subject,
+    location: v2Location,
+    maxTurns: v2MaxTurns,
+    archetype: v2Archetype,
+  };
 
   return (
     <div style={styles.container}>
@@ -204,6 +249,11 @@ export default function App() {
         <span style={styles.subtitle}>ADHD Classroom Behavioral Simulation</span>
         {isMulti && classId != null && (
           <span style={styles.classBadge}>Class #{classId}</span>
+        )}
+        {mode === "v2" && running && (
+          <span style={styles.classBadge}>
+            Day {v2Day} · {v2Period}교시 · {v2Subject || "—"} · {v2Location}
+          </span>
         )}
         <span style={{ ...styles.status, color: connected ? "#4ade80" : "#f87171" }}>
           {connected ? "Connected" : "Connecting..."}
@@ -219,6 +269,7 @@ export default function App() {
             mode={mode}
             multiTurnData={latestTurn}
             scenario={activeScenario}
+            v2Info={v2Info}
           />
 
           {isMulti && (
@@ -229,6 +280,8 @@ export default function App() {
                 targetStudentId={teacherAction?.student_id}
                 managedCount={managedCount}
                 totalAdhd={totalAdhd}
+                mode={mode}
+                v2Info={v2Info}
               />
             </div>
           )}
@@ -260,7 +313,7 @@ export default function App() {
           />
 
           {isMulti && (
-            <GrowthPanel growthData={growthData} />
+            <GrowthPanel growthData={growthData} mode={mode} />
           )}
 
           <ChatLog events={events} mode={mode} />

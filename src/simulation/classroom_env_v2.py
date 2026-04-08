@@ -144,6 +144,71 @@ except ImportError:
 
 SUBJECTS = ["korean", "math", "science", "social", "art", "music", "pe", "moral"]
 
+
+# ---------------------------------------------------------------------------
+# Classroom Archetypes (Phase 2 enhancement)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ClassroomArchetype:
+    """Archetype that modifies classroom characteristics and student behavior."""
+
+    name: str
+    description: str
+    adhd_prevalence_modifier: float = 0.0  # added to base prevalence
+    noise_level: float = 0.5  # 0=very quiet, 1=very chaotic
+    structure_level: float = 0.5  # 0=unstructured, 1=highly structured
+    peer_conflict_modifier: float = 0.0  # added to base conflict rate
+    teacher_support_available: bool = True  # counselor/aide available
+
+
+CLASSROOM_ARCHETYPES: dict[str, ClassroomArchetype] = {
+    "quiet_structured": ClassroomArchetype(
+        name="quiet_structured",
+        description="조용하고 구조화된 교실. 학습 규칙이 명확함.",
+        noise_level=0.2,
+        structure_level=0.8,
+        peer_conflict_modifier=-0.05,
+    ),
+    "chaotic": ClassroomArchetype(
+        name="chaotic",
+        description="소란스러운 교실. 학생들이 자주 떠들고 이동함.",
+        noise_level=0.8,
+        structure_level=0.3,
+        peer_conflict_modifier=0.10,
+    ),
+    "exam_period": ClassroomArchetype(
+        name="exam_period",
+        description="시험 기간. 스트레스 높고 조용하지만 긴장감 있음.",
+        noise_level=0.3,
+        structure_level=0.9,
+        peer_conflict_modifier=0.05,
+    ),
+    "high_ses": ClassroomArchetype(
+        name="high_ses",
+        description="교육열 높은 지역. 학부모 관심 많고 자원 풍부.",
+        noise_level=0.3,
+        structure_level=0.7,
+        teacher_support_available=True,
+    ),
+    "low_ses": ClassroomArchetype(
+        name="low_ses",
+        description="교육 자원 부족 지역. 교사 1인 담당, 지원 제한적.",
+        adhd_prevalence_modifier=0.02,
+        noise_level=0.6,
+        structure_level=0.4,
+        teacher_support_available=False,
+    ),
+    "mixed_grade": ClassroomArchetype(
+        name="mixed_grade",
+        description="복식 학급. 다양한 학년이 섞여있음.",
+        noise_level=0.5,
+        structure_level=0.4,
+        peer_conflict_modifier=0.05,
+    ),
+}
+
 # Management thresholds
 MANAGED_COMPLIANCE = 0.80
 MANAGED_CONSECUTIVE = 25  # ~1 week of sustained improvement
@@ -536,6 +601,7 @@ class ClassroomV2:
         adhd_prevalence: tuple[float, float] | float | None = None,
         seed: int | None = None,
         interaction_log: InteractionLog | None = None,
+        archetype: str | None = None,
     ):
         self.n_students = n_students
         self.adhd_prevalence: tuple[float, float] | float = adhd_prevalence or (0.06, 0.11)
@@ -562,9 +628,25 @@ class ClassroomV2:
 
         self._rng = random.Random(seed)
 
+        # Classroom archetype (Phase 2 enhancement)
+        self._archetype_name: str | None = archetype
+        self.archetype: ClassroomArchetype | None = None
+        if archetype is not None:
+            self.set_archetype(archetype)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def set_archetype(self, name: str) -> None:
+        """Set the classroom archetype by name."""
+        if name not in CLASSROOM_ARCHETYPES:
+            raise ValueError(
+                f"Unknown archetype '{name}'. "
+                f"Available: {list(CLASSROOM_ARCHETYPES.keys())}"
+            )
+        self._archetype_name = name
+        self.archetype = CLASSROOM_ARCHETYPES[name]
 
     def reset(self) -> ClassroomObservation:
         """Generate a new class of students with relationships."""
@@ -574,7 +656,16 @@ class ClassroomV2:
         self.period = 1
         self.identified_adhd_ids = set()
         self.managed_ids = set()
+
+        # Pick archetype: use fixed one if set, otherwise random
+        if self._archetype_name is not None:
+            self.set_archetype(self._archetype_name)
+        else:
+            name = self._rng.choice(list(CLASSROOM_ARCHETYPES.keys()))
+            self.set_archetype(name)
+
         self.students = self._generate_students()
+        self._apply_archetype_effects()
         self.relationships = self._generate_relationships()
         self.daily_schedule = self._generate_daily_schedule()
         return self._make_observation()
@@ -656,6 +747,9 @@ class ClassroomV2:
         return self.daily_schedule[(self.period - 1) % len(self.daily_schedule)]
 
     def _current_location(self) -> str:
+        # Transition between days: first turn of a new day is hallway
+        if self.turn > 1 and self.period == 1:
+            return "hallway"
         subject = self._current_subject()
         if subject == "pe":
             return "playground"
@@ -669,11 +763,13 @@ class ClassroomV2:
         """Generate students with realistic Korean prevalence distribution."""
         students: list[CognitiveStudent] = []
 
-        # ADHD count
+        # ADHD count (archetype may modify prevalence)
         if isinstance(self.adhd_prevalence, tuple):
             rate = self._rng.uniform(*self.adhd_prevalence)
         else:
             rate = self.adhd_prevalence
+        if self.archetype is not None:
+            rate = max(0.0, rate + self.archetype.adhd_prevalence_modifier)
         n_adhd = max(0, round(self.n_students * rate))
 
         # Confounding profile counts (Korean comorbidity data PMC5290097)
@@ -757,6 +853,50 @@ class ClassroomV2:
 
         return students
 
+    def _apply_archetype_effects(self) -> None:
+        """Apply archetype modifiers to student baselines after generation."""
+        if self.archetype is None:
+            return
+
+        arch = self.archetype
+
+        for student in self.students:
+            # Noise level affects attention baseline and escalation risk
+            noise_delta = (arch.noise_level - 0.5) * 0.15
+            student.state["attention"] = _clamp(
+                student.state.get("attention", 0.5) - noise_delta
+            )
+            student.state["escalation_risk"] = _clamp(
+                student.state.get("escalation_risk", 0.1) + noise_delta * 0.5
+            )
+
+            # Structure level improves compliance baseline
+            structure_delta = (arch.structure_level - 0.5) * 0.10
+            student.state["compliance"] = _clamp(
+                student.state.get("compliance", 0.7) + structure_delta
+            )
+
+            # Exam period increases stress/distress
+            if arch.name == "exam_period":
+                student.state["distress_level"] = _clamp(
+                    student.state.get("distress_level", 0.15) + 0.10
+                )
+
+            # Low SES: no teacher support means higher baseline distress
+            if not arch.teacher_support_available:
+                student.state["distress_level"] = _clamp(
+                    student.state.get("distress_level", 0.15) + 0.05
+                )
+
+            # Emotional baselines: chaotic classrooms increase arousal
+            if hasattr(student, "emotions") and hasattr(student.emotions, "arousal"):
+                student.emotions.arousal = _clamp(
+                    student.emotions.arousal + (arch.noise_level - 0.5) * 0.1
+                )
+                student.emotions.stress = _clamp(
+                    student.emotions.stress + (1.0 - arch.structure_level) * 0.05
+                )
+
     # ------------------------------------------------------------------
     # Relationship generation
     # ------------------------------------------------------------------
@@ -775,8 +915,10 @@ class ClassroomV2:
                 if s1.profile_type == s2.profile_type:
                     friend_prob += 0.1
 
-                # Conflict probability
+                # Conflict probability (archetype modifies base rate)
                 conflict_prob = 0.05
+                if self.archetype is not None:
+                    conflict_prob = max(0.0, conflict_prob + self.archetype.peer_conflict_modifier)
                 if s1.profile_type == "odd":
                     conflict_prob += 0.15
                 if s2.profile_type == "odd":

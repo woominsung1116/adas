@@ -231,6 +231,10 @@ class UnifiedSchoolScene extends Phaser.Scene {
     this.characters = new Map();
     this._frameCount = 0;
 
+    // Interaction lines (v2): [{x1,y1,x2,y2,color,text,alpha,createdAt}]
+    this._interactionLines = [];
+    this.interactionGraphics = null;
+
     // UI
     this.statusText = null;
     this.turnText = null;
@@ -265,6 +269,9 @@ class UnifiedSchoolScene extends Phaser.Scene {
 
     // ── Layer 4: Character sprites (redrawn each frame) ──
     this.characterGraphics = this.add.graphics();
+
+    // ── Layer 4.5: Interaction lines (v2) ──
+    this.interactionGraphics = this.add.graphics();
 
     // ── Layer 5: Bubble group ──
     this.bubbleGroup = this.add.group();
@@ -383,6 +390,9 @@ class UnifiedSchoolScene extends Phaser.Scene {
 
     // Redraw characters every frame (they layer on top of everything)
     this._drawAllCharacters();
+
+    // Draw and fade interaction lines
+    this._drawInteractionLines();
   }
 
   // ── Draw all characters ────────────────────────────────────────────────
@@ -401,6 +411,28 @@ class UnifiedSchoolScene extends Phaser.Scene {
         ch.facing, ch.frame,
         ch.isTeacher
       );
+
+      // Status indicator dot above head
+      if (ch._simData) {
+        const statusCol = studentColor(ch._simData);
+        const size = ch.isTeacher ? 1.25 : 1.0;
+        g.fillStyle(statusCol, 0.9);
+        g.fillCircle(ch.x, ch.y - 8 * size - 4, 3);
+      }
+
+      // ADHD identified ring
+      if (ch._simData?.is_identified) {
+        const size = ch.isTeacher ? 14 : 11;
+        g.lineStyle(1.5, 0x60a5fa, 0.8);
+        g.strokeCircle(ch.x, ch.y, size + 2);
+      }
+
+      // Managed checkmark dot
+      if (ch._simData?.is_managed) {
+        const size = ch.isTeacher ? 1.25 : 1.0;
+        g.fillStyle(0xa855f7, 0.9);
+        g.fillCircle(ch.x, ch.y - 8 * size - 4, 3);
+      }
     });
   }
 
@@ -584,6 +616,62 @@ class UnifiedSchoolScene extends Phaser.Scene {
     });
   }
 
+  // ── Interaction lines (v2) ──────────────────────────────────────────────
+  showInteractionLines(interactions) {
+    if (!interactions || !Array.isArray(interactions) || interactions.length === 0) return;
+    const now = Date.now();
+
+    interactions.forEach(({ actor, target, event_type }) => {
+      // Find character profile ids that map to these simulation student ids
+      let actorChId = null;
+      let targetChId = null;
+      this.characters.forEach((ch, id) => {
+        if (ch._simId === actor) actorChId = id;
+        if (ch._simId === target) targetChId = id;
+      });
+      if (!actorChId || !targetChId) return;
+
+      const chA = this.characters.get(actorChId);
+      const chB = this.characters.get(targetChId);
+      if (!chA || !chB) return;
+
+      // Color by interaction type
+      let color = 0x94a3b8; // default gray
+      if (event_type === "peer_conflict" || event_type === "peer_bullying") color = 0xef4444;
+      else if (event_type === "peer_chat" || event_type === "peer_help" || event_type === "peer_friendship") color = 0x60a5fa;
+      else if (event_type === "peer_contagion") color = 0xfbbf24;
+
+      this._interactionLines.push({
+        x1: chA.x, y1: chA.y,
+        x2: chB.x, y2: chB.y,
+        color,
+        createdAt: now,
+      });
+    });
+  }
+
+  _drawInteractionLines() {
+    if (!this.interactionGraphics) return;
+    this.interactionGraphics.clear();
+    const now = Date.now();
+    const DURATION = 2000; // 2 seconds fade
+    // Remove expired lines
+    this._interactionLines = this._interactionLines.filter((l) => now - l.createdAt < DURATION);
+    this._interactionLines.forEach((line) => {
+      const elapsed = now - line.createdAt;
+      const alpha = Math.max(0, 1 - elapsed / DURATION);
+      this.interactionGraphics.lineStyle(2, line.color, alpha * 0.7);
+      this.interactionGraphics.strokeLineShape(
+        new Phaser.Geom.Line(line.x1, line.y1, line.x2, line.y2)
+      );
+      // Draw label at midpoint
+      const mx = (line.x1 + line.x2) / 2;
+      const my = (line.y1 + line.y2) / 2;
+      this.interactionGraphics.fillStyle(line.color, alpha);
+      this.interactionGraphics.fillCircle(mx, my, 3);
+    });
+  }
+
   // ── Bubble ─────────────────────────────────────────────────────────────
   showBubble(x, y, text, isTeacher) {
     this.bubbleGroup.clear(true, true);
@@ -672,11 +760,12 @@ class UnifiedSchoolScene extends Phaser.Scene {
     }
   }
 
-  // ── Multi mode update ──────────────────────────────────────────────────
-  updateMultiState(students, teacherAction, turn, classId, scenario) {
+  // ── Multi + V2 mode update ──────────────────────────────────────────────
+  updateMultiState(students, teacherAction, turn, classId, scenario, v2Location) {
     const actionType = teacherAction?.action_type || "";
     const targetId = teacherAction?.student_id || null;
-    const area = deriveArea(scenario, actionType, turn, null);
+    // V2 provides location directly; multi mode derives it from scenario
+    const area = v2Location || deriveArea(scenario, actionType, turn, null);
 
     if (area !== this.activeArea) {
       this.setActiveArea(area);
@@ -765,10 +854,20 @@ class UnifiedSchoolScene extends Phaser.Scene {
       this.statusText.setColor("#94a3b8");
     }
   }
+
+  // ── V2 mode update with interactions ──────────────────────────────────
+  updateV2State(turnData) {
+    const { students, teacher_action, turn, class_id, location, interactions } = turnData;
+    if (!students) return;
+    this.updateMultiState(students, teacher_action, turn, class_id, null, location || "classroom");
+    if (interactions && Array.isArray(interactions) && interactions.length > 0) {
+      this.showInteractionLines(interactions);
+    }
+  }
 }
 
 // ── React component ──────────────────────────────────────────────────────
-export default function ClassroomView({ state, events, mode, multiTurnData, scenario }) {
+export default function ClassroomView({ state, events, mode, multiTurnData, scenario, v2Info }) {
   const containerRef = useRef(null);
   const gameRef = useRef(null);
   const sceneRef = useRef(null);
@@ -809,17 +908,21 @@ export default function ClassroomView({ state, events, mode, multiTurnData, scen
 
   // Classic mode updates
   useEffect(() => {
-    if (sceneRef.current && mode !== "multi") {
+    if (sceneRef.current && mode === "classic") {
       sceneRef.current.updateSimState(state, events ?? [], scenario);
     }
   }, [state, events, mode, scenario]);
 
-  // Multi mode updates
+  // Multi + V2 mode updates
   useEffect(() => {
-    if (sceneRef.current && mode === "multi" && multiTurnData) {
-      const { students, teacher_action, turn, class_id } = multiTurnData;
-      if (students) {
-        sceneRef.current.updateMultiState(students, teacher_action, turn, class_id, scenario);
+    if (sceneRef.current && (mode === "multi" || mode === "v2") && multiTurnData) {
+      if (mode === "v2") {
+        sceneRef.current.updateV2State(multiTurnData);
+      } else {
+        const { students, teacher_action, turn, class_id } = multiTurnData;
+        if (students) {
+          sceneRef.current.updateMultiState(students, teacher_action, turn, class_id, scenario);
+        }
       }
     }
   }, [multiTurnData, mode, scenario]);

@@ -45,7 +45,7 @@ function MetricRow({ label, value, history, format }) {
   );
 }
 
-export default function GrowthPanel({ growthData }) {
+export default function GrowthPanel({ growthData, mode }) {
   if (!growthData) {
     return (
       <div style={styles.container}>
@@ -61,6 +61,8 @@ export default function GrowthPanel({ growthData }) {
     specificity,
     f1,
     ppv,
+    auprc,
+    macro_f1,
     history = {},
   } = growthData;
 
@@ -97,6 +99,22 @@ export default function GrowthPanel({ growthData }) {
         history={history.f1}
         format={(v) => v.toFixed(3)}
       />
+      {(mode === "v2" || auprc != null) && (
+        <MetricRow
+          label="AUPRC"
+          value={auprc}
+          history={history.auprc}
+          format={(v) => v != null ? v.toFixed(3) : "—"}
+        />
+      )}
+      {(mode === "v2" || macro_f1 != null) && (
+        <MetricRow
+          label="Macro-F1"
+          value={macro_f1}
+          history={history.macro_f1}
+          format={(v) => v != null ? v.toFixed(3) : "—"}
+        />
+      )}
 
       {totalClasses >= 2 && (
         <div style={styles.trendNote}>

@@ -308,3 +308,66 @@ def test_v2_session_deterministic_with_seed():
     ids1 = [s["id"] for s in ws1.sent[0]["students"]]
     ids2 = [s["id"] for s in ws2.sent[0]["students"]]
     assert ids1 == ids2
+
+
+def test_v2_turn_includes_structured_interactions():
+    """Turn events should have interaction array with actor/target/event_type."""
+    ws = MockWebSocket()
+    _run(asyncio.wait_for(_run_v2_session(ws, _default_msg()), timeout=15))
+
+    turns = _events_of_type(ws, "turn")
+    assert len(turns) > 0
+
+    for t in turns:
+        interactions = t.get("interactions")
+        assert isinstance(interactions, list), (
+            f"interactions should be a list, got {type(interactions)}"
+        )
+        for ix in interactions:
+            assert "actor" in ix
+            assert "target" in ix
+            assert "event_type" in ix
+            assert ix["event_type"].startswith("peer_")
+
+
+def test_v2_class_complete_includes_reports():
+    """class_complete should have reports array."""
+    ws = MockWebSocket()
+    _run(asyncio.wait_for(_run_v2_session(ws, _default_msg()), timeout=15))
+
+    cc = ws.sent[-1]
+    assert cc["type"] == "class_complete"
+    assert "reports" in cc
+    assert isinstance(cc["reports"], list)
+
+
+def test_v2_class_complete_includes_auprc_macro_f1():
+    """class_complete growth should have auprc and macro_f1 keys."""
+    ws = MockWebSocket()
+    _run(asyncio.wait_for(_run_v2_session(ws, _default_msg()), timeout=15))
+
+    cc = ws.sent[-1]
+    assert cc["type"] == "class_complete"
+    assert "growth" in cc
+    growth = cc["growth"]
+    assert isinstance(growth, dict)
+    # growth may be empty if no tracker, but the key must exist
+    if growth:
+        assert "auprc" in growth
+        assert "macro_f1" in growth
+
+
+def test_v2_private_correction_sets_office_location():
+    """When teacher does private_correction, turn location should be 'office'."""
+    ws = MockWebSocket()
+    _run(asyncio.wait_for(_run_v2_session(ws, _default_msg(n_students=20, seed=7)), timeout=30))
+
+    turns = _events_of_type(ws, "turn")
+    # Check that any turn with private_correction action has office location
+    for t in turns:
+        action = t.get("teacher_action", {})
+        if action.get("action_type") == "private_correction":
+            assert t["location"] == "office", (
+                f"Turn {t['turn']}: private_correction should set location to 'office', "
+                f"got '{t['location']}'"
+            )

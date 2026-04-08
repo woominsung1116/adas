@@ -18,6 +18,8 @@ Inattention    : careless-mistakes, not-following-instructions, incomplete-tasks
 from __future__ import annotations
 
 import math
+import random
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -326,7 +328,14 @@ class TeacherMemory:
         memory.record_outcome("s1", was_correct=True)
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        retrieval_noise: float = 0.0,
+        principle_promotion_threshold: int = 7,
+        principle_min_classes: int = 3,
+        memory_decay_rate: float = 0.99,
+        seed: int | None = None,
+    ) -> None:
         self.case_base = CaseBase()
         self.experience_base = ExperienceBase()
         self._metrics = CrossClassMetrics()
@@ -336,6 +345,18 @@ class TeacherMemory:
         self._pending_action: dict[str, str] = {}
         self._pending_state: dict[str, dict[str, float]] = {}
         self._pending_behaviors: dict[str, list[str]] = {}
+
+        # Phase 2 enhancements: noise, promotion gating, decay
+        self.retrieval_noise = retrieval_noise
+        self.principle_promotion_threshold = principle_promotion_threshold
+        self.principle_min_classes = principle_min_classes
+        self.memory_decay_rate = memory_decay_rate
+        self._rng = random.Random(seed)
+
+        # Pending principles that haven't yet met promotion threshold
+        self._pending_principles: dict[str, list[int]] = defaultdict(list)
+        # Track which class_id each case record belongs to
+        self._record_class_ids: list[int] = []
 
     # ------------------------------------------------------------------
     # Class lifecycle
@@ -349,6 +370,7 @@ class TeacherMemory:
         self._pending_state = {}
         self._pending_behaviors = {}
         self._metrics.classes_seen += 1
+        self._current_class_id = self._metrics.classes_seen
 
     def advance_turn(self) -> None:
         self._turn += 1
@@ -407,7 +429,12 @@ class TeacherMemory:
             action_taken=self._pending_action.get(student_id, "none"),
             outcome=outcome,
         )
-        return self.case_base.add(record)
+        idx = self.case_base.add(record)
+        # Track which class this record belongs to (for principle promotion)
+        class_id = getattr(self, "_current_class_id", self._metrics.classes_seen)
+        while len(self._record_class_ids) <= idx:
+            self._record_class_ids.append(class_id)
+        return idx
 
     # ------------------------------------------------------------------
     # RAG-style retrieval
@@ -418,21 +445,45 @@ class TeacherMemory:
         observation: list[str],
         top_k: int = 5,
         exclude_student_id: Optional[str] = None,
+        noise_rate: float | None = None,
     ) -> list[tuple[float, ObservationRecord]]:
         """
-        Retrieve similar past cases by cosine similarity on behavior vectors.
+        Retrieve similar past cases with retrieval noise and memory decay.
+
+        Retrieval noise: ~20% chance of dropping each result (simulates
+        imperfect teacher recall). Memory decay: older observations get
+        reduced similarity scores.
 
         Args:
             observation:        List of observed behavior strings.
             top_k:              Number of cases to return.
             exclude_student_id: Exclude this student's own past records.
+            noise_rate:         Override default retrieval_noise rate.
 
         Returns:
             List of (similarity_score, ObservationRecord) sorted descending.
         """
-        return self.case_base.retrieve_similar(
-            observation, top_k=top_k, exclude_student_id=exclude_student_id
+        rate = noise_rate if noise_rate is not None else self.retrieval_noise
+        # Over-fetch to compensate for noise drops
+        raw_results = self.case_base.retrieve_similar(
+            observation, top_k=top_k + 3, exclude_student_id=exclude_student_id
         )
+
+        # Apply memory decay: reduce similarity for old memories
+        decayed_results: list[tuple[float, ObservationRecord]] = []
+        for sim, record in raw_results:
+            age = max(0, self._turn - record.turn)
+            decay_factor = self.memory_decay_rate ** age
+            decayed_results.append((sim * decay_factor, record))
+
+        # Re-sort after decay
+        decayed_results.sort(key=lambda x: x[0], reverse=True)
+
+        # Apply retrieval noise: randomly drop ~noise_rate of results
+        noisy_results = [
+            r for r in decayed_results if self._rng.random() > rate
+        ]
+        return noisy_results[:top_k]
 
     # ------------------------------------------------------------------
     # ADHD identification
@@ -589,21 +640,48 @@ class TeacherMemory:
 
     def add_principle(self, principle: str, evidence: list[int]) -> bool:
         """
-        Manually add a principle to the Experience Base.
+        Add a principle with promotion gating.
+
+        Principles require `principle_promotion_threshold` supporting cases
+        from at least `principle_min_classes` different classes before being
+        promoted to the Experience Base. Until then they accumulate in
+        `_pending_principles`.
 
         Args:
             principle: Natural-language principle string.
             evidence:  List of Case Base record indices supporting this principle.
 
         Returns:
-            True if the principle was accepted, False if rejected.
+            True if the principle was promoted, False if still pending.
         """
-        return self.experience_base.add_principle(
-            text=principle,
-            evidence_case_ids=evidence,
-            is_corrective=False,
-            case_base=self.case_base,
-        )
+        # Accumulate evidence in pending store
+        pending = self._pending_principles[principle]
+        for idx in evidence:
+            if idx not in pending:
+                pending.append(idx)
+
+        # Check promotion criteria
+        n_evidence = len(pending)
+        distinct_classes = set()
+        for idx in pending:
+            if idx < len(self._record_class_ids):
+                distinct_classes.add(self._record_class_ids[idx])
+
+        if (
+            n_evidence >= self.principle_promotion_threshold
+            and len(distinct_classes) >= self.principle_min_classes
+        ):
+            promoted = self.experience_base.add_principle(
+                text=principle,
+                evidence_case_ids=list(pending),
+                is_corrective=False,
+                case_base=self.case_base,
+            )
+            if promoted:
+                del self._pending_principles[principle]
+            return promoted
+
+        return False
 
     # ------------------------------------------------------------------
     # Cross-class growth report

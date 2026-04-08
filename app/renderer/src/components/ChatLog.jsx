@@ -37,6 +37,7 @@ function MultiTurnEntry({ ev }) {
   const action = ev.teacher_action || {};
   const actionType = action.action_type || "observe";
   const color = ACTION_COLORS[actionType] || "#94a3b8";
+  const hasV2Info = ev.day != null;
 
   // Find targeted student name
   const targetStudent = ev.students?.find((s) => s.id === action.student_id);
@@ -44,6 +45,15 @@ function MultiTurnEntry({ ev }) {
 
   return (
     <>
+      {/* V2: Day/Period/Subject header */}
+      {hasV2Info && (
+        <div style={styles.v2Header}>
+          [Day {ev.day} · {ev.period}교시 · {ev.subject || "—"}]
+          {ev.location && ev.location !== "classroom" && (
+            <span style={styles.v2Location}> {ev.location}</span>
+          )}
+        </div>
+      )}
       <div style={styles.meta}>
         <span style={styles.turn}>T{ev.turn}</span>
         <span style={{ ...styles.action, color }}>
@@ -58,6 +68,12 @@ function MultiTurnEntry({ ev }) {
           </span>
         )}
       </div>
+      {/* V2: Interaction count (interactions is a structured array) */}
+      {Array.isArray(ev.interactions) && ev.interactions.length > 0 && (
+        <div style={styles.interactionBadge}>
+          학생 상호작용 {ev.interactions.length}건
+        </div>
+      )}
       {action.reasoning && (
         <div style={styles.reasoning}>{action.reasoning}</div>
       )}
@@ -247,6 +263,30 @@ const styles = {
     padding: "2px 7px",
     borderRadius: 4,
     fontWeight: 700,
+  },
+  v2Header: {
+    fontSize: 10,
+    color: "#60a5fa",
+    marginBottom: 3,
+    fontWeight: 600,
+  },
+  v2Location: {
+    fontSize: 9,
+    color: "#a855f7",
+    background: "#581c8733",
+    padding: "1px 4px",
+    borderRadius: 3,
+    marginLeft: 4,
+  },
+  interactionBadge: {
+    fontSize: 9,
+    color: "#f59e0b",
+    background: "#78350f33",
+    padding: "1px 5px",
+    borderRadius: 3,
+    marginTop: 2,
+    marginBottom: 2,
+    display: "inline-block",
   },
   classComplete: {
     padding: 2,

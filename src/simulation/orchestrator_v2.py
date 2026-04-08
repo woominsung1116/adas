@@ -25,7 +25,49 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Any, Generator, Optional
+from typing import Any, Generator, Optional, Dict, List
+
+
+# ---------------------------------------------------------------------------
+# Teacher Emotional State (Phase 2 enhancement)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TeacherEmotionalState:
+    """Teacher emotional state that affects observation and decision quality.
+
+    Patience depletes with difficult students/incidents, partially recovers
+    between days. Frustration accumulates and reduces observation accuracy.
+    Burnout (low patience) degrades decision quality.
+    """
+
+    patience: float = 0.80
+    empathy_capacity: float = 0.70
+    frustration: float = 0.10
+    bias: dict = field(default_factory=dict)
+
+    def update_after_turn(self, classroom_mood: str, n_incidents: int) -> None:
+        """Update emotional state based on turn events."""
+        self.patience = max(0.1, self.patience - 0.01 * n_incidents)
+        self.frustration = min(0.9, self.frustration + 0.005 * n_incidents)
+
+        # Chaotic/tense mood drains patience faster
+        if classroom_mood in ("chaotic", "tense"):
+            self.patience = max(0.1, self.patience - 0.005)
+
+    def daily_recovery(self) -> None:
+        """Partial recovery at the start of each day."""
+        self.patience = min(0.9, self.patience + 0.03)
+        self.frustration = max(0.0, self.frustration - 0.01)
+
+    def observation_accuracy(self) -> float:
+        """How accurately the teacher reads student emotional state."""
+        return min(1.0, self.empathy_capacity * (1.0 - self.frustration * 0.3))
+
+    def is_burned_out(self) -> bool:
+        """Teacher is burned out when patience drops below 0.3."""
+        return self.patience < 0.3
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +104,7 @@ try:
         DetailedObservation,
         MANAGED_COMPLIANCE,
         MANAGED_CONSECUTIVE,
+        CLASSROOM_ARCHETYPES,
     )
 except ImportError as e:
     raise ImportError(
@@ -237,6 +280,81 @@ class _StudentTrack:
 
 
 # ---------------------------------------------------------------------------
+# Hypothesis-Verification Tracker (Phase 2 sub-phases)
+# ---------------------------------------------------------------------------
+
+# Intervention strategies used for hypothesis testing in Phase 2b
+_HYPOTHESIS_TEST_STRATEGIES: list[str] = [
+    "empathic_acknowledgment",  # anxiety differentiator
+    "break_offer",              # ADHD differentiator
+    "firm_boundary",            # ODD differentiator
+]
+
+
+@dataclass
+class HypothesisTracker:
+    """Track hypothesis-verification tests for a suspicious student.
+
+    Phase 2 sub-phases:
+      2a: Flag as suspicious (adhd_indicator_score >= 0.5, observations >= 5)
+      2b: Apply differential interventions and record compliance deltas
+      2c: After 3+ different tests, infer likely profile from response pattern
+    """
+
+    student_id: str
+    suspicion_turn: int
+    tests_applied: Dict[str, List[float]] = field(default_factory=dict)  # strategy -> [compliance_deltas]
+    diagnosis_hypothesis: str = "unknown"  # adhd_inattentive | adhd_hyperactive | anxiety | odd | unknown
+
+    def record_test(self, strategy: str, compliance_delta: float) -> None:
+        """Record the compliance delta from a hypothesis test intervention."""
+        self.tests_applied.setdefault(strategy, []).append(compliance_delta)
+
+    def can_identify(self) -> bool:
+        """Require at least 3 different intervention tests before identification."""
+        return len(self.tests_applied) >= 3
+
+    def likely_profile(self) -> str:
+        """Infer likely profile from intervention response pattern.
+
+        Decision logic:
+          - empathic_acknowledgment helps a lot (avg delta > 0.05) -> anxiety
+          - break_offer helps (avg delta > 0.03) -> ADHD
+          - firm_boundary causes defiance (avg delta < -0.03) -> ODD
+          - break helps + firm_boundary negative -> ADHD combined
+          - mixed/ambiguous -> unknown
+        """
+        def avg_delta(strategy: str) -> float:
+            deltas = self.tests_applied.get(strategy, [])
+            return sum(deltas) / len(deltas) if deltas else 0.0
+
+        empathic_avg = avg_delta("empathic_acknowledgment")
+        break_avg = avg_delta("break_offer")
+        firm_avg = avg_delta("firm_boundary")
+
+        # Strong empathic response -> likely anxiety, not ADHD
+        if empathic_avg > 0.05 and break_avg <= 0.03:
+            self.diagnosis_hypothesis = "anxiety"
+            return "anxiety"
+
+        # Firm boundary causes defiance, break doesn't help much -> ODD
+        if firm_avg < -0.03 and break_avg <= 0.02:
+            self.diagnosis_hypothesis = "odd"
+            return "odd"
+
+        # Break helps, firm boundary negative or neutral -> ADHD
+        if break_avg > 0.03:
+            if firm_avg < -0.01:
+                self.diagnosis_hypothesis = "adhd_hyperactive"
+            else:
+                self.diagnosis_hypothesis = "adhd_inattentive"
+            return self.diagnosis_hypothesis
+
+        self.diagnosis_hypothesis = "unknown"
+        return "unknown"
+
+
+# ---------------------------------------------------------------------------
 # Intervention strategy pool
 # ---------------------------------------------------------------------------
 
@@ -280,12 +398,19 @@ class OrchestratorV2:
         max_classes: int | None = None,
         seed: int | None = None,
         phase_config: PhaseConfig | None = None,
+        feedback_rate: float = 0.30,
     ):
         self.log = InteractionLog()
         self.classroom = ClassroomV2(
             n_students=n_students, seed=seed, interaction_log=self.log,
         )
-        self.memory = TeacherMemory()
+        self.memory = TeacherMemory(
+            retrieval_noise=0.20,
+            principle_promotion_threshold=7,
+            principle_min_classes=3,
+            memory_decay_rate=0.99,
+            seed=seed,
+        )
         self.evaluator = IdentificationEvaluator()
         self.growth = GrowthTracker()
         self.phase_config = phase_config or PhaseConfig()
@@ -294,7 +419,11 @@ class OrchestratorV2:
             self.teacher_llm = TeacherLLM(llm_backend, self.memory)
         self.class_count = 0
         self.max_classes = max_classes
+        self.feedback_rate = feedback_rate
         self._rng = random.Random(seed)
+        self.teacher_emotions = TeacherEmotionalState()
+        # Per-class hypothesis trackers, reset each class
+        self._hypothesis_trackers: dict[str, HypothesisTracker] = {}
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -325,15 +454,22 @@ class OrchestratorV2:
             dict with "type": "turn" for each turn
             dict with "type": "class_complete" as final yield
         """
+        # Randomly pick a classroom archetype for this class
+        archetype = self._rng.choice(list(CLASSROOM_ARCHETYPES.keys()))
+        self.classroom.set_archetype(archetype)
+
         obs = self.classroom.reset()
         self.memory.new_class()
 
-        # First yield: new_class event with student roster
+        # First yield: new_class event with student roster and archetype
+        arch = self.classroom.archetype
         yield {
             "type": "new_class",
             "class_id": self.class_count + 1,
             "n_students": len(self.classroom.students),
             "max_turns": self.classroom.MAX_TURNS,
+            "archetype": arch.name if arch else "unknown",
+            "archetype_description": arch.description if arch else "",
             "students": [
                 {
                     "id": s.student_id,
@@ -356,15 +492,21 @@ class OrchestratorV2:
         self._stream_events: list[dict] = []
         self._stream_reports: list[IdentificationReport] = []
         self._stream_identified: set[str] = set()
+        self._stream_ruled_out: set[str] = set()
         self._stream_suspicious: dict[str, float] = {}
         self._stream_strategies_used: set[str] = set()
         self._stream_identification_turns: list[float] = []
         self._stream_final_turn = 0
         self._stream_obs = obs
+        self._hypothesis_trackers = {}  # reset per class
 
         for turn in range(1, self.classroom.MAX_TURNS + 1):
             self.memory.advance_turn()
             self._stream_final_turn = turn
+
+            # Teacher daily recovery (at start of each day, period 1)
+            if turn % 5 == 1:
+                self.teacher_emotions.daily_recovery()
 
             # 1. Teacher decides action
             action = self._decide_action(
@@ -411,6 +553,12 @@ class OrchestratorV2:
 
             # 7. Log teacher action as interaction event
             self._log_teacher_action(action, self._stream_obs, turn)
+
+            # 7b. Update teacher emotional state
+            n_incidents = len(info.get("interactions", []))
+            self.teacher_emotions.update_after_turn(
+                self._stream_obs.class_mood, n_incidents
+            )
 
             # 8. Build and yield turn event
             event = self._make_event(
@@ -505,6 +653,13 @@ class OrchestratorV2:
         students = self.classroom.students
         n = len(students)
 
+        # Teacher emotional state affects identification thresholds.
+        # Burned-out teachers flag students more aggressively (lower threshold)
+        # and prefer firm_boundary over empathic strategies.
+        _id_threshold_modifier = 1.0
+        if self.teacher_emotions.is_burned_out():
+            _id_threshold_modifier = 0.8  # lower threshold = more aggressive
+
         # ---- Phase 1: Pure observation (turns 1..observation_end) ----
         if turn <= pc.observation_end:
             idx = (turn - 1) % n
@@ -515,19 +670,51 @@ class OrchestratorV2:
                 reasoning=f"Phase 1: baseline observation sweep turn {turn}",
             )
 
-        # ---- Phase 2: Screening (turns observation_end+1..screening_end) ----
+        # ---- Phase 2: Screening with hypothesis-verification sub-phases ----
         if turn <= pc.screening_end:
-            # Update suspicion scores for all unidentified students
+            # Phase 2a: Update suspicion scores, flag suspicious students
             if turn % 5 == 1:  # refresh every 5 turns
                 for s in students:
-                    if s.student_id in identified:
+                    if s.student_id in identified or s.student_id in self._stream_ruled_out:
                         continue
                     profile = self.memory.get_profile(s.student_id)
                     score = profile.adhd_indicator_score()
-                    if score > 0.3:
+                    n_obs = sum(profile.behavior_frequency_counts.values())
+                    if score >= 0.5 and n_obs >= 5:
+                        suspicious[s.student_id] = score
+                        # Create hypothesis tracker if not exists
+                        if s.student_id not in self._hypothesis_trackers:
+                            self._hypothesis_trackers[s.student_id] = HypothesisTracker(
+                                student_id=s.student_id,
+                                suspicion_turn=turn,
+                            )
+                    elif score > 0.3:
                         suspicious[s.student_id] = score
 
-            # Focus on most suspicious unidentified student
+            # Phase 2b: Hypothesis testing for tracked suspicious students
+            for sid, tracker in self._hypothesis_trackers.items():
+                if sid in identified or sid in self._stream_ruled_out:
+                    continue
+                student_obj = self.classroom.get_student(sid)
+                if student_obj is None:
+                    continue
+
+                # Determine which test strategy hasn't been tried yet
+                untested = [
+                    strat for strat in _HYPOTHESIS_TEST_STRATEGIES
+                    if strat not in tracker.tests_applied
+                ]
+                if untested:
+                    strategy = untested[0]
+                    return TeacherAction(
+                        action_type="individual_intervention",
+                        student_id=sid,
+                        strategy=strategy,
+                        reasoning=f"Phase 2b: hypothesis test '{strategy}' for {sid} "
+                                  f"(tests done: {len(tracker.tests_applied)}/3)",
+                    )
+
+            # Focus on most suspicious unidentified student (still in 2a observation)
             candidate = self._most_suspicious_student(identified)
             if candidate:
                 profile = self.memory.get_profile(candidate.student_id)
@@ -549,6 +736,23 @@ class OrchestratorV2:
 
         # ---- Phase 3: Identification (turns screening_end+1..identification_end) ----
         if turn <= pc.identification_end:
+            # Phase 2c check: complete any remaining hypothesis tests first
+            for sid, tracker in self._hypothesis_trackers.items():
+                if sid in identified or sid in self._stream_ruled_out:
+                    continue
+                untested = [
+                    strat for strat in _HYPOTHESIS_TEST_STRATEGIES
+                    if strat not in tracker.tests_applied
+                ]
+                if untested:
+                    strategy = untested[0]
+                    return TeacherAction(
+                        action_type="individual_intervention",
+                        student_id=sid,
+                        strategy=strategy,
+                        reasoning=f"Phase 3 (completing 2c): hypothesis test '{strategy}' for {sid}",
+                    )
+
             # Try to identify high-confidence students
             candidate = self._most_suspicious_student(identified)
             if candidate:
@@ -556,16 +760,41 @@ class OrchestratorV2:
                 score = profile.adhd_indicator_score()
                 n_obs = sum(profile.behavior_frequency_counts.values())
 
-                if score >= 0.85 and n_obs >= 10:
-                    is_adhd, confidence, reasoning = self.memory.identify_adhd(
-                        candidate.student_id
-                    )
-                    if confidence >= 0.85:
-                        return TeacherAction(
-                            action_type="identify_adhd",
-                            student_id=candidate.student_id,
-                            reasoning=reasoning,
+                if score >= (0.85 * _id_threshold_modifier) and n_obs >= 10:
+                    # Phase 2c: differential diagnosis gate
+                    tracker = self._hypothesis_trackers.get(candidate.student_id)
+                    if tracker and tracker.can_identify():
+                        likely = tracker.likely_profile()
+                        # Only identify if hypothesis points to ADHD
+                        if likely.startswith("adhd") or likely == "unknown":
+                            is_adhd, confidence, reasoning = self.memory.identify_adhd(
+                                candidate.student_id
+                            )
+                            if confidence >= 0.85:
+                                hypo_info = f" [hypothesis={likely}]"
+                                return TeacherAction(
+                                    action_type="identify_adhd",
+                                    student_id=candidate.student_id,
+                                    reasoning=reasoning + hypo_info,
+                                )
+                        else:
+                            # Hypothesis says anxiety/ODD, rule out as non-ADHD
+                            self._stream_ruled_out.add(candidate.student_id)
+                            return TeacherAction(
+                                action_type="class_instruction",
+                                reasoning=f"Phase 3: hypothesis={likely}, not ADHD, ruled out {candidate.student_id}",
+                            )
+                    elif tracker is None:
+                        # No hypothesis tracker (low-suspicion path), use old logic
+                        is_adhd, confidence, reasoning = self.memory.identify_adhd(
+                            candidate.student_id
                         )
+                        if confidence >= 0.85:
+                            return TeacherAction(
+                                action_type="identify_adhd",
+                                student_id=candidate.student_id,
+                                reasoning=reasoning,
+                            )
 
                 # Not enough confidence yet, keep observing
                 return TeacherAction(
@@ -606,7 +835,7 @@ class OrchestratorV2:
                 profile = self.memory.get_profile(candidate.student_id)
                 score = profile.adhd_indicator_score()
                 n_obs = sum(profile.behavior_frequency_counts.values())
-                if score >= 0.75 and n_obs >= 10:
+                if score >= (0.75 * _id_threshold_modifier) and n_obs >= 10:
                     is_adhd, confidence, reasoning = self.memory.identify_adhd(
                         candidate.student_id
                     )
@@ -658,11 +887,11 @@ class OrchestratorV2:
             profile = self.memory.get_profile(candidate.student_id)
             score = profile.adhd_indicator_score()
             n_obs = sum(profile.behavior_frequency_counts.values())
-            if score >= 0.70 and n_obs >= 10:
+            if score >= (0.70 * _id_threshold_modifier) and n_obs >= 10:
                 is_adhd, confidence, reasoning = self.memory.identify_adhd(
                     candidate.student_id
                 )
-                if confidence >= 0.70:
+                if confidence >= (0.70 * _id_threshold_modifier):
                     return TeacherAction(
                         action_type="identify_adhd",
                         student_id=candidate.student_id,
@@ -696,9 +925,10 @@ class OrchestratorV2:
         """Return the unidentified student with highest ADHD indicator score."""
         best_score = -1.0
         best_student = None
+        ruled_out = getattr(self, "_stream_ruled_out", set())
 
         for s in self.classroom.students:
-            if s.student_id in identified:
+            if s.student_id in identified or s.student_id in ruled_out:
                 continue
             profile = self.memory.get_profile(s.student_id)
             score = profile.adhd_indicator_score()
@@ -712,9 +942,14 @@ class OrchestratorV2:
     # ------------------------------------------------------------------
 
     def _choose_strategy(self, student: Any) -> str:
-        """Pick best intervention strategy based on memory and current state."""
+        """Pick best intervention strategy based on memory, state, and teacher emotions."""
         profile = self.memory.get_profile(student.student_id)
         history = profile.response_to_interventions
+
+        # Teacher emotional state biases strategy choice
+        # Burned out: prefer firm_boundary, avoid empathic strategies
+        if self.teacher_emotions.is_burned_out():
+            return "firm_boundary"
 
         if history:
             best = max(history, key=lambda k: history[k])
@@ -723,6 +958,13 @@ class OrchestratorV2:
         distress = student.state.get("distress_level", 0.5)
         escalation = student.state.get("escalation_risk", 0.3)
         attention = student.state.get("attention", 0.5)
+
+        # Low empathy: misreads anxiety as defiance, uses firm_boundary
+        if (
+            distress >= 0.6
+            and self.teacher_emotions.observation_accuracy() < 0.5
+        ):
+            return "firm_boundary"
 
         if distress >= 0.6:
             return "empathic_acknowledgment"
@@ -749,8 +991,25 @@ class OrchestratorV2:
 
         Detailed observations are processed and committed first so that
         subsequent summary processing cannot overwrite them.
+        Also records compliance deltas for hypothesis testing interventions.
         """
         committed_this_turn: set[str] = set()
+
+        # Record hypothesis test results: measure compliance delta from intervention
+        if (
+            action.student_id
+            and action.strategy in _HYPOTHESIS_TEST_STRATEGIES
+            and action.student_id in self._hypothesis_trackers
+        ):
+            student_obj = self.classroom.get_student(action.student_id)
+            track = tracks.get(action.student_id)
+            if student_obj and track and track.compliance_history:
+                prev_compliance = track.compliance_history[-1]
+                curr_compliance = student_obj.state.get("compliance", prev_compliance)
+                delta = curr_compliance - prev_compliance
+                self._hypothesis_trackers[action.student_id].record_test(
+                    action.strategy, delta
+                )
 
         # 1. Detailed observations first -- observe AND commit immediately
         for detail in obs.detailed_observations:
@@ -910,14 +1169,22 @@ class OrchestratorV2:
         }
         gt_subtype = gt_subtype_map.get(student.profile_type, None)
 
-        report.evaluate(
-            ground_truth_adhd=student.is_adhd,
-            ground_truth_subtype=gt_subtype,
-        )
-        self.evaluator.add_report(report)
-
-        # Record outcome in memory
-        self.memory.record_outcome(student_id, was_correct=bool(report.is_correct))
+        # Delayed feedback: only feedback_rate fraction of identifications
+        # get confirmed with ground truth. The rest remain unconfirmed.
+        if self._rng.random() < self.feedback_rate:
+            # Confirmed: teacher learns from outcome
+            report.evaluate(
+                ground_truth_adhd=student.is_adhd,
+                ground_truth_subtype=gt_subtype,
+            )
+            self.evaluator.add_report(report)
+            self.memory.record_outcome(student_id, was_correct=bool(report.is_correct))
+        else:
+            # Unconfirmed: teacher doesn't know if they were right.
+            # No outcome recorded -> Experience Base doesn't update for this case.
+            # Case Base still has the observation.
+            report.ground_truth_is_adhd = None
+            report.is_correct = None
 
         if track:
             track.identification_turn = turn
@@ -938,6 +1205,9 @@ class OrchestratorV2:
         identified_students: set[str],
     ) -> dict:
         """Create event dict for WebSocket streaming."""
+        location = info.get("location", "classroom")
+        if action.action_type == "private_correction":
+            location = "office"
         return {
             "type": "turn",
             "class_id": self.class_count + 1,
@@ -945,7 +1215,7 @@ class OrchestratorV2:
             "day": info.get("day", 1),
             "period": info.get("period", 1),
             "subject": info.get("subject", ""),
-            "location": info.get("location", "classroom"),
+            "location": location,
             "students": [
                 {
                     "id": s.student_id,
@@ -962,7 +1232,16 @@ class OrchestratorV2:
                 "strategy": action.strategy,
                 "reasoning": action.reasoning,
             },
-            "interactions": len(info.get("interactions", [])),
+            "interactions": [
+                {
+                    "actor": ev.actor,
+                    "target": ev.target,
+                    "event_type": ev.event_type,
+                    "content": ev.content[:80] if ev.content else "",
+                }
+                for ev in info.get("interactions", [])
+                if ev.event_type.startswith("peer_")
+            ][:5],
             "reward": round(float(reward), 4),
             "memory_summary": self._compact_memory_summary(),
         }
@@ -1033,6 +1312,21 @@ class OrchestratorV2:
 
         n_managed = sum(1 for s in self.classroom.students if s.is_adhd and s.managed)
 
+        # Per-category breakdown for Macro-F1
+        # ADHD TP/FP/FN counted from identified vs ground truth sets
+        adhd_tp = tp
+        adhd_fp = fp
+        adhd_fn = fn
+        # Confounder FP: normal students with confounding profiles wrongly identified
+        # Actual profile_type values: anxiety, odd, gifted, sleep_deprived
+        _CONFOUNDER_PROFILES = {"anxiety", "odd", "gifted", "sleep_deprived"}
+        confounder_fp = 0
+        for sid in (identified_students - ground_truth):
+            s_obj = self.classroom.get_student(sid)
+            if s_obj and hasattr(s_obj, "profile_type"):
+                if s_obj.profile_type in _CONFOUNDER_PROFILES:
+                    confounder_fp += 1
+
         metrics = ClassMetrics(
             class_id=self.class_count + 1,
             n_students=len(self.classroom.students),
@@ -1048,6 +1342,10 @@ class OrchestratorV2:
             behavior_improvement_rates=improvement_rates,
             n_managed=n_managed,
             class_completion_turn=turn,
+            adhd_tp=adhd_tp,
+            adhd_fp=adhd_fp,
+            adhd_fn=adhd_fn,
+            confounder_fp=confounder_fp,
         )
 
         return {

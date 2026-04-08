@@ -20,7 +20,7 @@ export default function ControlPanel({
   const [scenario, setScenario] = useState("");
 
   const handleStart = () => {
-    if (mode === "multi") {
+    if (mode === "multi" || mode === "v2") {
       onStart(profile, scenario);
     } else if (profile && scenario) {
       onStart(profile, scenario);
@@ -40,7 +40,7 @@ export default function ControlPanel({
     { name: "reading_to_cleanup", label: "Reading -> Cleanup" },
   ];
 
-  const canStart = mode === "multi" ? true : (!!profile && !!scenario);
+  const canStart = (mode === "multi" || mode === "v2") ? true : (!!profile && !!scenario);
 
   return (
     <div style={styles.container}>
@@ -49,7 +49,7 @@ export default function ControlPanel({
       {/* Mode toggle */}
       <div style={styles.modeRow}>
         <button
-          style={{ ...styles.modeBtn, ...(mode !== "multi" ? styles.modeBtnActive : {}) }}
+          style={{ ...styles.modeBtn, ...(mode === "classic" ? styles.modeBtnActive : {}) }}
           onClick={() => onModeChange("classic")}
           disabled={running}
         >
@@ -60,12 +60,19 @@ export default function ControlPanel({
           onClick={() => onModeChange("multi")}
           disabled={running}
         >
-          Multi-Student
+          Multi
+        </button>
+        <button
+          style={{ ...styles.modeBtn, ...(mode === "v2" ? styles.modeBtnActive : {}) }}
+          onClick={() => onModeChange("v2")}
+          disabled={running}
+        >
+          V2 (950턴)
         </button>
       </div>
 
       {/* Classic-only: profile & scenario selectors */}
-      {mode !== "multi" && (
+      {mode === "classic" && (
         <>
           <div style={styles.field}>
             <label style={styles.label}>Profile</label>
@@ -113,8 +120,18 @@ export default function ControlPanel({
         </div>
       )}
 
-      {/* Multi mode: managed/total progress */}
-      {mode === "multi" && running && totalAdhd != null && (
+      {/* V2 mode info */}
+      {mode === "v2" && (
+        <div style={styles.multiInfo}>
+          <span style={styles.multiInfoText}>1년 시뮬레이션 · 950턴 · 자동 아키타입</span>
+          {classId != null && running && (
+            <span style={styles.classCounter}>Class #{classId}</span>
+          )}
+        </div>
+      )}
+
+      {/* Multi/V2 mode: managed/total progress */}
+      {(mode === "multi" || mode === "v2") && running && totalAdhd != null && (
         <div style={styles.field}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
             <span style={styles.label}>ADHD 관리 진행</span>
@@ -133,8 +150,8 @@ export default function ControlPanel({
         </div>
       )}
 
-      {/* Speed slider (multi mode) */}
-      {mode === "multi" && running && (
+      {/* Speed slider (multi/v2 mode) */}
+      {(mode === "multi" || mode === "v2") && running && (
         <div style={styles.field}>
           <label style={styles.label}>
             Speed: {speed != null ? `${speed.toFixed(1)}s/turn` : "1.0s/turn"}
@@ -169,7 +186,7 @@ export default function ControlPanel({
           {running ? "Running..." : "Start Session"}
         </button>
 
-        {mode === "multi" && running && (
+        {(mode === "multi" || mode === "v2") && running && (
           <button
             style={styles.pauseBtn}
             onClick={paused ? onResume : onPause}

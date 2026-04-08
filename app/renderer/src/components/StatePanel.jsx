@@ -16,8 +16,8 @@ const ACTION_COLORS = {
 };
 
 export default function StatePanel({ state, mode, multiState }) {
-  if (mode === "multi") {
-    return <MultiStatePanel multiState={multiState} />;
+  if (mode === "multi" || mode === "v2") {
+    return <MultiStatePanel multiState={multiState} mode={mode} />;
   }
   return <ClassicStatePanel state={state} />;
 }
@@ -42,8 +42,8 @@ function ClassicStatePanel({ state }) {
   );
 }
 
-function MultiStatePanel({ multiState }) {
-  const { focusedStudent, teacherAction, identifiedCount, managedCount, totalAdhd } = multiState || {};
+function MultiStatePanel({ multiState, mode }) {
+  const { focusedStudent, teacherAction, identifiedCount, managedCount, totalAdhd, v2Info } = multiState || {};
 
   const focusedState = focusedStudent?.state;
   const actionColor = ACTION_COLORS[teacherAction?.action_type] || "#94a3b8";
@@ -63,6 +63,18 @@ function MultiStatePanel({ multiState }) {
           관리됨: <b style={{ color: "#a855f7" }}>{managedCount ?? 0}</b>/{totalAdhd ?? "?"}
         </span>
       </div>
+
+      {/* V2 context info */}
+      {mode === "v2" && v2Info && (
+        <div style={styles.v2InfoRow}>
+          <span style={styles.summaryItem}>
+            Day {v2Info.day} · {v2Info.period}교시
+          </span>
+          <span style={styles.summaryItem}>
+            {v2Info.subject || "—"} · {v2Info.location}
+          </span>
+        </div>
+      )}
 
       {/* Focused student state bars */}
       {focusedState
@@ -152,6 +164,15 @@ const styles = {
     padding: "5px 8px",
     background: "#0f172a",
     borderRadius: 5,
+  },
+  v2InfoRow: {
+    display: "flex",
+    gap: 12,
+    marginBottom: 8,
+    padding: "4px 8px",
+    background: "#1e3a5f33",
+    borderRadius: 5,
+    borderLeft: "2px solid #60a5fa",
   },
   summaryItem: {
     fontSize: 11,

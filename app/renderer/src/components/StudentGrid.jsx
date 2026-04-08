@@ -83,6 +83,22 @@ function StudentCard({ student, isTargeted }) {
         </span>
       </div>
 
+      {/* Emotional indicators */}
+      {student.state && (student.state.distress > 0.4 || student.state.escalation > 0.4) && (
+        <div style={{ display: "flex", gap: 3, marginTop: 2 }}>
+          {student.state.distress > 0.4 && (
+            <span style={{ fontSize: 8, color: "#ef4444", background: "#ef444422", padding: "0 3px", borderRadius: 2 }}>
+              distress {Math.round((student.state.distress ?? 0) * 100)}%
+            </span>
+          )}
+          {student.state.escalation > 0.4 && (
+            <span style={{ fontSize: 8, color: "#f59e0b", background: "#f59e0b22", padding: "0 3px", borderRadius: 2 }}>
+              esc {Math.round((student.state.escalation ?? 0) * 100)}%
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Behaviors (tiny text) */}
       {behaviors.length > 0 && (
         <div style={{ marginTop: 3, fontSize: 9, color: "#64748b", lineHeight: 1.3, overflow: "hidden", maxHeight: 24 }}>
@@ -100,7 +116,7 @@ function StudentCard({ student, isTargeted }) {
   );
 }
 
-export default function StudentGrid({ students, classId, targetStudentId, managedCount, totalAdhd }) {
+export default function StudentGrid({ students, classId, targetStudentId, managedCount, totalAdhd, mode, v2Info }) {
   if (!students || students.length === 0) {
     return (
       <div style={styles.empty}>
@@ -116,6 +132,14 @@ export default function StudentGrid({ students, classId, targetStudentId, manage
         <span style={styles.headerTitle}>학생 현황</span>
         {classId != null && (
           <span style={styles.classTag}>Class #{classId}</span>
+        )}
+        {mode === "v2" && v2Info && (
+          <span style={styles.v2Tag}>
+            Day {v2Info.day} · {v2Info.period}교시 · {v2Info.subject || "—"}
+          </span>
+        )}
+        {mode === "v2" && v2Info?.archetype && (
+          <span style={styles.v2Tag}>{v2Info.archetype}</span>
         )}
         {totalAdhd != null && (
           <span style={styles.stat}>
@@ -193,6 +217,14 @@ const styles = {
     padding: "2px 6px",
     borderRadius: 4,
     fontWeight: 700,
+  },
+  v2Tag: {
+    fontSize: 9,
+    color: "#60a5fa",
+    background: "#1e3a5f55",
+    padding: "2px 5px",
+    borderRadius: 3,
+    fontWeight: 600,
   },
   stat: {
     fontSize: 10,
