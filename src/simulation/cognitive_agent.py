@@ -888,13 +888,15 @@ class CognitiveStudent:
 
         if plan in ("on_task", "free_play", "physical_activity"):
             self.current_action = plan
-            # On-task students still occasionally show minor behaviors
             pools = _PROFILE_BEHAVIOR_MAP.get(self.profile_type, ["normal"])
-            primary_pool = BEHAVIOR_POOLS.get(pools[0], BEHAVIOR_POOLS["normal"])
-            if plan == "on_task" and rng.random() < 0.15 and len(pools) > 1:
-                # Slight chance of secondary behavior leaking through
-                secondary_pool = BEHAVIOR_POOLS.get(pools[1], BEHAVIOR_POOLS["normal"])
-                return [rng.choice(list(primary_pool) + list(secondary_pool))]
+            # ADHD/disordered students leak their primary behaviors even when
+            # "on_task" — the rate depends on plan_consistency (lower = more leak)
+            # Normal students almost always produce normal behaviors.
+            leak_rate = 1.0 - params.plan_consistency  # e.g. ADHD-I: 1-0.50 = 0.50
+            if plan == "on_task" and rng.random() < leak_rate and pools[0] != "normal":
+                # Primary behavior pool leaks through (e.g. inattention for ADHD-I)
+                primary_pool = BEHAVIOR_POOLS.get(pools[0], BEHAVIOR_POOLS["normal"])
+                return [rng.choice(primary_pool)]
             return [rng.choice(BEHAVIOR_POOLS["normal"])]
 
         if plan == "delay_start":

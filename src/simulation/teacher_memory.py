@@ -92,6 +92,7 @@ class ObservationRecord:
     state_snapshot: dict[str, float]  # distress/compliance/attention/escalation
     action_taken: str
     outcome: str  # 'positive', 'negative', 'neutral'
+    was_adhd: Optional[bool] = None  # set after identification outcome is known
     behavior_vector: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -138,10 +139,19 @@ class StudentProfile:
 
     def adhd_indicator_score(self) -> float:
         """
-        Heuristic score (0-1) based on frequency of ADHD-linked behaviors.
+        Heuristic score (0-1) based on PROPORTION of ADHD-linked behaviors
+        relative to total observed behaviors. Uses proportion instead of
+        absolute frequency so that a heavily-observed normal_active student
+        (who shows some ADHD-like behaviors mixed with normal ones) does not
+        score higher than a less-observed but genuinely ADHD student.
+
         Weights hyperactivity/impulsivity slightly higher than inattention
         because they are more observable in classroom settings (KCI ART002794420).
         """
+        total = sum(self.behavior_frequency_counts.values())
+        if total == 0:
+            return 0.0
+
         hyper = sum(
             self.behavior_frequency_counts.get(b, 0) for b in HYPERACTIVITY_BEHAVIORS
         )
@@ -151,8 +161,20 @@ class StudentProfile:
         inatten = sum(
             self.behavior_frequency_counts.get(b, 0) for b in INATTENTION_BEHAVIORS
         )
-        raw = 0.4 * hyper + 0.35 * impuls + 0.25 * inatten
-        return min(1.0, raw / 10.0)
+        adhd_count = hyper + impuls + inatten
+        adhd_ratio = adhd_count / total  # 0-1: what fraction of behaviors are ADHD-linked
+
+        # Weight by category importance
+        if adhd_count > 0:
+            weighted = (0.4 * hyper + 0.35 * impuls + 0.25 * inatten) / adhd_count
+        else:
+            weighted = 0.0
+
+        # Final score = ratio of ADHD behaviors × category weight
+        # Require minimum 5 observations to avoid noisy early scores
+        if total < 5:
+            return adhd_ratio * weighted * 0.5  # dampen early
+        return min(1.0, adhd_ratio * weighted)
 
 
 # ---------------------------------------------------------------------------
@@ -164,14 +186,26 @@ class CaseBase:
     """
     Stores ObservationRecords and supports RAG-style retrieval
     by cosine similarity on behavior vectors.
+
+    max_records caps storage to prevent O(n) retrieval from growing
+    unboundedly across classes. When exceeded, oldest records are dropped.
+    Default 10,000 keeps ~2 classes of history while staying fast (<2ms).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_records: int = 3000) -> None:
         self._records: list[ObservationRecord] = []
+        self._max_records = max_records
 
     def add(self, record: ObservationRecord) -> int:
         idx = len(self._records)
         self._records.append(record)
+        if len(self._records) > self._max_records:
+            # Protect labeled records (was_adhd is not None) from eviction.
+            # Partition into labeled (keep all) and unlabeled (keep recent).
+            labeled = [r for r in self._records if r.was_adhd is not None]
+            unlabeled = [r for r in self._records if r.was_adhd is None]
+            keep_unlabeled = max(0, self._max_records - len(labeled))
+            self._records = labeled + unlabeled[-keep_unlabeled:]
         return idx
 
     def retrieve_similar(
@@ -464,6 +498,15 @@ class TeacherMemory:
             List of (similarity_score, ObservationRecord) sorted descending.
         """
         rate = noise_rate if noise_rate is not None else self.retrieval_noise
+
+        # Early exit: noise=1.0 drops everything, skip expensive O(N) scan
+        if rate >= 1.0:
+            return []
+
+        # Early exit: empty case base
+        if len(self.case_base) == 0:
+            return []
+
         # Over-fetch to compensate for noise drops
         raw_results = self.case_base.retrieve_similar(
             observation, top_k=top_k + 3, exclude_student_id=exclude_student_id
@@ -507,44 +550,64 @@ class TeacherMemory:
         base_score = profile.adhd_indicator_score()
         dominant = profile.dominant_behaviors(top_k=5)
 
-        # RAG: retrieve similar cases from other students
+        # RAG: retrieve similar cases from other students.
+        # Only use records with known ADHD labels (from confirmed identifications).
         similar = self.retrieve_similar_cases(dominant, top_k=5, exclude_student_id=student_id)
         case_votes: list[float] = []
         case_context_parts: list[str] = []
         for sim, rec in similar:
             if sim < 0.1:
                 continue
-            vote = 1.0 if rec.outcome == "positive" else 0.0
+            if rec.was_adhd is None:
+                continue  # skip unlabeled records
+            vote = 1.0 if rec.was_adhd else 0.0
             case_votes.append(sim * vote)
             case_context_parts.append(
                 f"similar case ({rec.student_id}, turn {rec.turn}): "
-                f"{rec.observed_behaviors} -> {rec.outcome} (sim={sim:.2f})"
+                f"{rec.observed_behaviors} -> adhd={rec.was_adhd} (sim={sim:.2f})"
             )
 
-        case_adjustment = (
-            sum(case_votes) / max(len(case_votes), 1) if case_votes else 0.0
-        )
+        # Case-base signal: how many similar past students were ADHD?
+        if case_votes:
+            case_signal = sum(case_votes) / len(case_votes)
+        else:
+            case_signal = 0.0
 
-        # Principle boost: corrective principles lower confidence
-        principle_adjustment = 0.0
+        # Principle signal: corrective principles lower, positive raise
+        principle_signal = 0.0
         applied_principles: list[str] = []
         for p in self.experience_base.top_principles(top_k=5):
             if self._principle_applies(p.text, dominant):
-                delta = -0.05 if p.is_corrective else 0.05
-                principle_adjustment += delta
+                delta = -0.08 if p.is_corrective else 0.08
+                principle_signal += delta
                 applied_principles.append(p.text)
+        principle_signal = min(1.0, max(-1.0, principle_signal))
 
-        raw_confidence = (
-            0.5 * base_score
-            + 0.3 * case_adjustment
-            + 0.2 * min(1.0, max(0.0, base_score + principle_adjustment))
-        )
+        # Blend: with populated case base, case evidence dominates and can
+        # push confidence higher. Without case evidence, behavioral score
+        # alone yields a lower ceiling, making early-class identification
+        # harder (the growth curve we want).
+        if case_votes:
+            raw_confidence = (
+                base_score * 0.3
+                + case_signal * 0.5
+                + min(1.0, max(0.0, base_score + principle_signal)) * 0.2
+            )
+        else:
+            # No cross-student evidence: rely on behavioral score with a cap.
+            # observation count gives slight boost with more data.
+            n_obs = sum(profile.behavior_frequency_counts.values())
+            obs_factor = min(1.0, n_obs / 20.0)  # ramps 0->1 over 20 obs
+            raw_confidence = (
+                base_score * (0.55 + 0.10 * obs_factor)
+                + min(1.0, max(0.0, base_score + principle_signal)) * 0.15
+            )
         confidence = min(1.0, max(0.0, raw_confidence))
         is_adhd = confidence >= 0.5
 
         reasoning_parts = [
             f"behavioral score={base_score:.2f}",
-            f"case-base signal={case_adjustment:.2f} from {len(case_votes)} similar cases",
+            f"case-base signal={case_signal:.2f} from {len(case_votes)} similar cases",
         ]
         if case_context_parts:
             reasoning_parts.append("evidence: " + "; ".join(case_context_parts[:2]))
@@ -572,6 +635,8 @@ class TeacherMemory:
     def record_outcome(self, student_id: str, was_correct: bool) -> None:
         """
         Update cross-class metrics and extract a principle from this outcome.
+        Also retroactively tags all case-base records for this student with
+        the ADHD determination so future retrieval can use it.
 
         Args:
             student_id:  Student whose identification is being evaluated.
@@ -579,6 +644,17 @@ class TeacherMemory:
         """
         profile = self._get_or_create_profile(student_id)
         self._metrics.total_identifications += 1
+
+        # Determine actual ADHD status from identification + correctness
+        if profile.identified_as_adhd:
+            actual_adhd = was_correct  # identified as ADHD, correct -> is ADHD
+        else:
+            actual_adhd = not was_correct  # identified as non-ADHD, correct -> not ADHD
+
+        # Retroactively tag all case-base records for this student
+        for rec in self.case_base._records:
+            if rec.student_id == student_id:
+                rec.was_adhd = actual_adhd
 
         if was_correct:
             self._metrics.correct_identifications += 1

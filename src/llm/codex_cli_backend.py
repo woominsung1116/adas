@@ -59,6 +59,20 @@ class CodexCLIBackend(LLMBackend):
         self.cache.set(prompt, self._cache_context(), response)
         return response
 
+    def generate_raw(self, prompt: str) -> str:
+        """Call Codex CLI without state schema enforcement.
+
+        Used for teacher action decisions where the response is a JSON object
+        with action_type/student_id/strategy/reasoning, not state/narrative.
+        """
+        cached = self.cache.get(prompt, self._cache_context())
+        if cached is not None:
+            return cached
+
+        response = self._call_codex_raw(prompt)
+        self.cache.set(prompt, self._cache_context(), response)
+        return response
+
     def _cache_context(self) -> str:
         return json.dumps(
             {
@@ -127,6 +141,58 @@ class CodexCLIBackend(LLMBackend):
                 for temp_path in (schema_path, output_path):
                     if temp_path and os.path.exists(temp_path):
                         os.remove(temp_path)
+
+            if attempt < self.retry_attempts - 1:
+                time.sleep(self.retry_delay)
+
+        raise RuntimeError(f"Codex CLI failed after {self.retry_attempts} attempts: {last_error}")
+
+    def _call_codex_raw(self, prompt: str) -> str:
+        """Call Codex CLI without schema enforcement. Returns raw text response."""
+        last_error = "Codex CLI returned an empty or invalid response."
+        for attempt in range(self.retry_attempts):
+            output_path = None
+            try:
+                output_fd, output_path = tempfile.mkstemp(suffix=".txt")
+                os.close(output_fd)
+
+                command = [
+                    self.command,
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--sandbox",
+                    "read-only",
+                    "--ephemeral",
+                    "--output-last-message",
+                    output_path,
+                ]
+                if self.model:
+                    command.extend(["-m", self.model])
+                command.append("-")
+
+                result = subprocess.run(
+                    command,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self.timeout,
+                    cwd=self.cwd,
+                )
+
+                candidate = self._read_candidate_response(result.stdout, output_path)
+                if result.returncode == 0 and candidate.strip():
+                    return candidate
+
+                stderr = (result.stderr or "").strip()
+                if stderr:
+                    last_error = stderr
+            except subprocess.TimeoutExpired:
+                last_error = f"Codex CLI timed out after {self.timeout} seconds"
+            finally:
+                if output_path and os.path.exists(output_path):
+                    os.remove(output_path)
 
             if attempt < self.retry_attempts - 1:
                 time.sleep(self.retry_delay)

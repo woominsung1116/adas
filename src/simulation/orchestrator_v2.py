@@ -202,6 +202,7 @@ _BEHAVIOR_TO_DSM5: dict[str, str] = {
 
 # Map env behavior strings -> teacher_memory ALL_BEHAVIORS vocabulary.
 _ENV_TO_MEM_BEHAVIOR: dict[str, str] = {
+    # v1 env behavior names
     "out_of_seat":            "seat-leaving",
     "calling_out":            "blurting-answers",
     "blurting":               "blurting-answers",
@@ -217,6 +218,22 @@ _ENV_TO_MEM_BEHAVIOR: dict[str, str] = {
     "losing_materials":       "poor-organization",
     "not_starting_task":      "incomplete-tasks",
     "impulsive_response":     "blurting-answers",
+    # v2 cognitive_agent behavior names (underscore → hyphen mapping)
+    "seat_leaving":              "seat-leaving",
+    "leg_swinging":              "leg-swinging",
+    "paper_folding":             "paper-folding",
+    "running_climbing":          "running/climbing",
+    "blurting_answers":          "blurting-answers",
+    "off_topic_comments":        "off-topic-comments",
+    "grabbing_objects":          "grabbing-objects",
+    "careless_mistakes":         "careless-mistakes",
+    "not_following_instructions": "not-following-instructions",
+    "incomplete_tasks":          "incomplete-tasks",
+    "poor_organization":         "poor-organization",
+    "easily_distracted":         "easily-distracted",
+    # Additional cognitive_agent behaviors
+    "looking_around":            "easily-distracted",
+    "boredom_fidgeting":         "leg-swinging",
 }
 
 
@@ -678,9 +695,37 @@ class OrchestratorV2:
                     if s.student_id in identified or s.student_id in self._stream_ruled_out:
                         continue
                     profile = self.memory.get_profile(s.student_id)
-                    score = profile.adhd_indicator_score()
+                    base_score = profile.adhd_indicator_score()
                     n_obs = sum(profile.behavior_frequency_counts.values())
-                    if score >= 0.5 and n_obs >= 5:
+
+                    # --- Fix 1 + Fix 4: Memory-informed suspicion scoring ---
+                    dominant = profile.dominant_behaviors(top_k=5)
+                    score = base_score
+
+                    # Case-base prior: only query for students with non-trivial
+                    # behavioral score to avoid expensive O(N) retrieval for
+                    # clearly-normal students.
+                    if base_score >= 0.10 and dominant:
+                        labeled_records = self._get_labeled_cases(
+                            dominant, s.student_id
+                        )
+                        if labeled_records:
+                            case_adhd_rate = sum(
+                                1 for _, rec in labeled_records if rec.was_adhd
+                            ) / len(labeled_records)
+                            score = base_score * 0.6 + case_adhd_rate * 0.4
+
+                    # Experience-base principles adjust score
+                    for p in self.memory.experience_base.top_principles(top_k=5):
+                        if self.memory._principle_applies(p.text, dominant):
+                            if p.is_corrective:
+                                score *= 0.8
+                            else:
+                                score *= 1.2
+
+                    score = min(1.0, score)
+
+                    if score >= 0.15 and n_obs >= 3:
                         suspicious[s.student_id] = score
                         # Create hypothesis tracker if not exists
                         if s.student_id not in self._hypothesis_trackers:
@@ -688,45 +733,67 @@ class OrchestratorV2:
                                 student_id=s.student_id,
                                 suspicion_turn=turn,
                             )
-                    elif score > 0.3:
+                    elif score > 0.10:
                         suspicious[s.student_id] = score
 
-            # Phase 2b: Hypothesis testing for tracked suspicious students
-            for sid, tracker in self._hypothesis_trackers.items():
-                if sid in identified or sid in self._stream_ruled_out:
-                    continue
-                student_obj = self.classroom.get_student(sid)
-                if student_obj is None:
-                    continue
+            # Interleave hypothesis testing (2/3 turns) with discovery (1/3 turns)
+            # This prevents the teacher from spending ALL Phase 2 on testing
+            # known suspicious students while missing undiscovered ADHD students.
+            is_discovery_turn = (turn % 3 == 0)
 
-                # Determine which test strategy hasn't been tried yet
-                untested = [
-                    strat for strat in _HYPOTHESIS_TEST_STRATEGIES
-                    if strat not in tracker.tests_applied
-                ]
-                if untested:
-                    strategy = untested[0]
+            if not is_discovery_turn:
+                # Phase 2b: Hypothesis testing for tracked suspicious students
+                for sid, tracker in self._hypothesis_trackers.items():
+                    if sid in identified or sid in self._stream_ruled_out:
+                        continue
+                    student_obj = self.classroom.get_student(sid)
+                    if student_obj is None:
+                        continue
+                    untested = [
+                        strat for strat in _HYPOTHESIS_TEST_STRATEGIES
+                        if strat not in tracker.tests_applied
+                    ]
+                    if untested:
+                        strategy = untested[0]
+                        return TeacherAction(
+                            action_type="individual_intervention",
+                            student_id=sid,
+                            strategy=strategy,
+                            reasoning=f"Phase 2b: hypothesis test '{strategy}' for {sid} "
+                                      f"(tests done: {len(tracker.tests_applied)}/3)",
+                        )
+
+                # Focus on most suspicious unidentified student
+                candidate = self._most_suspicious_student(identified)
+                if candidate:
+                    profile = self.memory.get_profile(candidate.student_id)
+                    n_obs = sum(profile.behavior_frequency_counts.values())
                     return TeacherAction(
-                        action_type="individual_intervention",
-                        student_id=sid,
-                        strategy=strategy,
-                        reasoning=f"Phase 2b: hypothesis test '{strategy}' for {sid} "
-                                  f"(tests done: {len(tracker.tests_applied)}/3)",
+                        action_type="observe",
+                        student_id=candidate.student_id,
+                        reasoning=f"Phase 2: screening {candidate.student_id} "
+                                  f"(score={suspicious.get(candidate.student_id, 0):.2f}, obs={n_obs})",
                     )
 
-            # Focus on most suspicious unidentified student (still in 2a observation)
-            candidate = self._most_suspicious_student(identified)
-            if candidate:
-                profile = self.memory.get_profile(candidate.student_id)
-                n_obs = sum(profile.behavior_frequency_counts.values())
+            # Discovery turn (or nothing suspicious) -- observe least-observed student
+            # This prevents observation bias where only visible students get attention
+            least_observed = None
+            min_obs = float("inf")
+            for s in students:
+                if s.student_id in identified or s.student_id in self._stream_ruled_out:
+                    continue
+                profile = self.memory.get_profile(s.student_id)
+                n_obs = sum(profile.behavior_frequency_counts.values()) if profile else 0
+                if n_obs < min_obs:
+                    min_obs = n_obs
+                    least_observed = s
+            if least_observed:
                 return TeacherAction(
                     action_type="observe",
-                    student_id=candidate.student_id,
-                    reasoning=f"Phase 2: screening {candidate.student_id} "
-                              f"(score={suspicious.get(candidate.student_id, 0):.2f}, obs={n_obs})",
+                    student_id=least_observed.student_id,
+                    reasoning=f"Phase 2: observe least-seen student {least_observed.student_id} (obs={min_obs})",
                 )
-
-            # Nothing suspicious -- rotate observation
+            # Fallback: rotate
             idx = (turn - 1) % n
             return TeacherAction(
                 action_type="observe",
@@ -753,6 +820,20 @@ class OrchestratorV2:
                         reasoning=f"Phase 3 (completing 2c): hypothesis test '{strategy}' for {sid}",
                     )
 
+            # --- Memory-informed identification threshold ---
+            # A teacher with more case-base experience (labeled records from
+            # prior classes) needs less hypothesis evidence to be confident.
+            # This is the KEY mechanism where memory improves over classes.
+            n_labeled = sum(
+                1 for rec in self.memory.case_base._records
+                if rec.was_adhd is not None
+            )
+            # experience_boost: ramps from 0.0 (no prior labels) to 0.20
+            # (500+ labeled records = ~2-3 prior classes with feedback)
+            experience_boost = min(0.20, n_labeled / 2500.0)
+            # With experience, identification threshold drops from 0.40 to 0.20
+            id_threshold = max(0.20, 0.40 - experience_boost)
+
             # Try to identify high-confidence students
             candidate = self._most_suspicious_student(identified)
             if candidate:
@@ -760,7 +841,7 @@ class OrchestratorV2:
                 score = profile.adhd_indicator_score()
                 n_obs = sum(profile.behavior_frequency_counts.values())
 
-                if score >= (0.85 * _id_threshold_modifier) and n_obs >= 10:
+                if score >= (0.20 * _id_threshold_modifier) and n_obs >= 5:
                     # Phase 2c: differential diagnosis gate
                     tracker = self._hypothesis_trackers.get(candidate.student_id)
                     if tracker and tracker.can_identify():
@@ -770,13 +851,34 @@ class OrchestratorV2:
                             is_adhd, confidence, reasoning = self.memory.identify_adhd(
                                 candidate.student_id
                             )
-                            if confidence >= 0.85:
-                                hypo_info = f" [hypothesis={likely}]"
+                            # Hypothesis test completion boosts confidence:
+                            # passing 3 differential tests is strong evidence
+                            if likely.startswith("adhd"):
+                                confidence = min(1.0, confidence + 0.35)
+                            # Memory-informed threshold: experienced teacher
+                            # can identify with less confidence
+                            if confidence >= id_threshold:
+                                hypo_info = (
+                                    f" [hypothesis={likely}, "
+                                    f"threshold={id_threshold:.2f}, "
+                                    f"experience_boost={experience_boost:.3f}]"
+                                )
                                 return TeacherAction(
                                     action_type="identify_adhd",
                                     student_id=candidate.student_id,
                                     reasoning=reasoning + hypo_info,
                                 )
+                            else:
+                                # Low confidence after hypothesis testing:
+                                # rule out after enough observation to avoid
+                                # getting stuck on the same student forever
+                                if n_obs >= 15:
+                                    self._stream_ruled_out.add(candidate.student_id)
+                                    return TeacherAction(
+                                        action_type="class_instruction",
+                                        reasoning=f"Phase 3: low confidence ({confidence:.2f}), "
+                                                  f"ruled out {candidate.student_id} after {n_obs} obs",
+                                    )
                         else:
                             # Hypothesis says anxiety/ODD, rule out as non-ADHD
                             self._stream_ruled_out.add(candidate.student_id)
@@ -794,6 +896,13 @@ class OrchestratorV2:
                                 action_type="identify_adhd",
                                 student_id=candidate.student_id,
                                 reasoning=reasoning,
+                            )
+                        elif n_obs >= 20:
+                            # Too many observations with no result, move on
+                            self._stream_ruled_out.add(candidate.student_id)
+                            return TeacherAction(
+                                action_type="class_instruction",
+                                reasoning=f"Phase 3: no tracker, low confidence, ruled out {candidate.student_id}",
                             )
 
                 # Not enough confidence yet, keep observing
@@ -906,14 +1015,231 @@ class OrchestratorV2:
     def _decide_action_llm(
         self, obs: ClassroomObservation, turn: int
     ) -> TeacherAction:
-        """Use LLM backend for teacher decision. Falls back to rule-based on error."""
+        """Use LLM (Codex CLI) for teacher decision with full memory context.
+
+        Builds a Korean-language prompt including:
+        - Current observation (all students' visible behaviors)
+        - Teacher memory context (similar cases + principles from Experience Base)
+        - Student profiles accumulated so far
+        - Identified / ruled-out students
+        - Phase guidance
+        - Available actions
+
+        Falls back to rule-based on any error.
+        """
         try:
-            action = self.teacher_llm.decide_action(obs, turn)
-            if isinstance(action, TeacherAction):
-                return action
+            # 1. Build student observation summary
+            student_lines: list[str] = []
+            for summary in obs.student_summaries:
+                profile = self.memory.get_profile(summary.student_id)
+                score = profile.adhd_indicator_score() if profile else 0.0
+                behaviors = summary.behaviors
+                student_lines.append(
+                    f"  {summary.student_id}: behaviors={behaviors}, score={score:.2f}"
+                )
+
+            # 2. Retrieve memory context for top suspicious students
+            suspicious = getattr(self, "_stream_suspicious", {})
+            memory_context_lines: list[str] = []
+            for sid in list(suspicious.keys())[:5]:
+                profile = self.memory.get_profile(sid)
+                if not profile:
+                    continue
+                dominant = profile.dominant_behaviors(top_k=5)
+                similar = self.memory.retrieve_similar_cases(
+                    dominant, top_k=3, exclude_student_id=sid,
+                )
+                for sim, rec in similar:
+                    if sim < 0.05:
+                        continue
+                    label = (
+                        "ADHD" if rec.was_adhd
+                        else ("정상" if rec.was_adhd is False else "미확인")
+                    )
+                    memory_context_lines.append(
+                        f"  {sid}와 유사한 과거 사례: {rec.student_id} "
+                        f"(sim={sim:.2f}) -> {label}"
+                    )
+
+            # 3. Get principles from Experience Base
+            principles = self.memory.experience_base.top_principles(top_k=5)
+            principle_lines = (
+                [f"  - {p.text}" for p in principles]
+                if principles
+                else ["  (아직 없음)"]
+            )
+
+            # 4. Determine current phase
+            pc = self.phase_config
+            if turn <= pc.observation_end:
+                phase = (
+                    f"Phase 1 (관찰, turn {turn}/{pc.observation_end}): "
+                    "모든 학생을 순환 관찰하세요."
+                )
+            elif turn <= pc.screening_end:
+                phase = (
+                    f"Phase 2 (스크리닝, turn {turn}/{pc.screening_end}): "
+                    "의심 학생을 집중 관찰하고 가설 테스트하세요."
+                )
+            elif turn <= pc.identification_end:
+                phase = (
+                    f"Phase 3 (판별, turn {turn}/{pc.identification_end}): "
+                    "충분한 근거가 있으면 판별하세요."
+                )
+            elif turn <= pc.care_end:
+                phase = (
+                    f"Phase 4 (케어, turn {turn}/{pc.care_end}): "
+                    "판별된 학생에게 개입하세요."
+                )
+            else:
+                phase = (
+                    f"Phase 5 (유지, turn {turn}/950): "
+                    "관리 완료 학생의 재발을 모니터하세요."
+                )
+
+            # 5. Gather identified and ruled-out sets
+            identified = getattr(self, "_stream_identified", set())
+            ruled_out = getattr(self, "_stream_ruled_out", set())
+
+            # 6. Build full prompt
+            prompt = (
+                "당신은 한국 초등학교 담임교사입니다. 20명의 학생을 관찰하며 "
+                "ADHD가 의심되는 학생을 판별하고 케어합니다.\n\n"
+                f"## 현재 상황\n"
+                f"턴: {turn}/950 (Day {obs.day})\n"
+                f"{phase}\n\n"
+                f"## 학생 관찰\n"
+                + "\n".join(student_lines) + "\n\n"
+                f"## 이미 ADHD로 판별한 학생\n"
+                f"{list(identified) if identified else '없음'}\n\n"
+                f"## 제외한 학생 (ADHD 아닌 것으로 판단)\n"
+                f"{list(ruled_out) if ruled_out else '없음'}\n\n"
+                f"## 과거 유사 사례 (Case Base)\n"
+                + ("\n".join(memory_context_lines) if memory_context_lines
+                   else "  (유사 사례 없음)") + "\n\n"
+                f"## 학습된 원칙 (Experience Base)\n"
+                + "\n".join(principle_lines) + "\n\n"
+                "## 사용 가능한 행동\n"
+                "1. observe(student_id) - 특정 학생 집중 관찰\n"
+                "2. class_instruction() - 전체 학급 지도\n"
+                "3. individual_intervention(student_id, strategy) - 개별 개입\n"
+                "   전략: transition_warning, offer_choice, labeled_praise, "
+                "visual_schedule_cue,\n"
+                "   break_offer, empathic_acknowledgment, redirect_attention, "
+                "countdown_timer,\n"
+                "   collaborative_problem_solving, ignore_wait, firm_boundary, "
+                "sensory_support\n"
+                "4. private_correction(student_id) - 교무실 1:1 상담\n"
+                "5. public_correction(student_id) - 교실 내 공개 지적\n"
+                "6. identify_adhd(student_id, reasoning) - ADHD 판별 (근거 필수)\n"
+                "7. generate_report(student_id) - 판별 리포트 생성\n\n"
+                "하나의 행동을 선택하세요. 과거 사례와 원칙을 참고하여 판단하세요.\n"
+                '반드시 JSON으로만 응답:\n'
+                '{"action_type": "...", "student_id": "...", '
+                '"strategy": "...", "reasoning": "..."}'
+            )
+
+            # 7. Call LLM via generate_raw (no state schema enforcement)
+            response = self.teacher_llm.backend.generate_raw(prompt)
+            return self._parse_llm_response(response)
         except Exception:
-            pass
-        return self._decide_action_rule_based(obs, turn, set(), {})
+            # Fallback to rule-based on any error
+            return self._decide_action_rule_based(
+                obs, turn,
+                getattr(self, "_stream_identified", set()),
+                getattr(self, "_stream_suspicious", {}),
+            )
+
+    def _parse_llm_response(self, raw: str) -> TeacherAction:
+        """Parse Codex CLI JSON response into a TeacherAction."""
+        import json as _json
+        import re as _re
+
+        text = raw.strip()
+        # Extract JSON from markdown code fences
+        fenced = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.DOTALL)
+        if fenced:
+            text = fenced.group(1)
+        else:
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start >= 0 and end > start:
+                text = text[start:end]
+
+        try:
+            data = _json.loads(text)
+            action_type = str(data.get("action_type", "class_instruction")).strip()
+            student_id = data.get("student_id") or None
+            strategy = data.get("strategy") or None
+            reasoning = str(data.get("reasoning", "")).strip()
+
+            valid_actions = {
+                "observe", "class_instruction", "individual_intervention",
+                "private_correction", "public_correction",
+                "identify_adhd", "generate_report",
+            }
+            if action_type not in valid_actions:
+                action_type = "class_instruction"
+
+            # Actions that need a student_id
+            if action_type in {
+                "observe", "individual_intervention", "private_correction",
+                "public_correction", "identify_adhd", "generate_report",
+            } and not student_id:
+                action_type = "class_instruction"
+                student_id = None
+                strategy = None
+
+            # individual_intervention needs a valid strategy
+            valid_strategies = {
+                "transition_warning", "offer_choice", "labeled_praise",
+                "visual_schedule_cue", "break_offer", "empathic_acknowledgment",
+                "redirect_attention", "countdown_timer",
+                "collaborative_problem_solving", "ignore_wait",
+                "firm_boundary", "sensory_support",
+            }
+            if action_type == "individual_intervention":
+                if strategy not in valid_strategies:
+                    strategy = "redirect_attention"
+
+            return TeacherAction(
+                action_type=action_type,
+                student_id=student_id,
+                strategy=strategy,
+                reasoning=reasoning,
+            )
+        except (_json.JSONDecodeError, KeyError):
+            return TeacherAction(
+                action_type="class_instruction",
+                reasoning="LLM parse error, fallback",
+            )
+
+    # ------------------------------------------------------------------
+    # Helper: cached labeled case retrieval (avoids repeated O(N) scans)
+    # ------------------------------------------------------------------
+
+    def _get_labeled_cases(
+        self, behaviors: list[str], exclude_student_id: str,
+    ) -> list[tuple[float, Any]]:
+        """Retrieve similar cases with known ADHD labels, with per-turn caching."""
+        # Cache key: turn + behaviors + excluded student
+        cache_key = (self.memory._turn, tuple(sorted(behaviors)), exclude_student_id)
+        if not hasattr(self, "_labeled_cache"):
+            self._labeled_cache: dict = {}
+        if cache_key in self._labeled_cache:
+            return self._labeled_cache[cache_key]
+
+        similar = self.memory.retrieve_similar_cases(
+            behaviors, top_k=5, exclude_student_id=exclude_student_id,
+        )
+        labeled = [
+            (sim, rec) for sim, rec in similar if rec.was_adhd is not None
+        ]
+        self._labeled_cache[cache_key] = labeled
+        # Limit cache size to prevent memory bloat
+        if len(self._labeled_cache) > 200:
+            self._labeled_cache.clear()
+        return labeled
 
     # ------------------------------------------------------------------
     # Helper: most suspicious student
@@ -922,16 +1248,26 @@ class OrchestratorV2:
     def _most_suspicious_student(
         self, identified: set[str],
     ) -> Any:
-        """Return the unidentified student with highest ADHD indicator score."""
+        """Return the unidentified student with highest suspicion score.
+
+        Uses precomputed memory-blended scores from _stream_suspicious when
+        available (populated in Phase 2a). Falls back to behavioral score only.
+        """
         best_score = -1.0
         best_student = None
         ruled_out = getattr(self, "_stream_ruled_out", set())
+        suspicious = getattr(self, "_stream_suspicious", {})
 
         for s in self.classroom.students:
             if s.student_id in identified or s.student_id in ruled_out:
                 continue
-            profile = self.memory.get_profile(s.student_id)
-            score = profile.adhd_indicator_score()
+            # Use precomputed memory-blended score if available
+            if s.student_id in suspicious:
+                score = suspicious[s.student_id]
+            else:
+                profile = self.memory.get_profile(s.student_id)
+                score = profile.adhd_indicator_score()
+
             if score > best_score:
                 best_score = score
                 best_student = s
@@ -951,10 +1287,47 @@ class OrchestratorV2:
         if self.teacher_emotions.is_burned_out():
             return "firm_boundary"
 
+        # --- Fix 3: Check what worked for similar students in case base ---
+        # Only query if no local intervention history yet, and only if there
+        # are labeled records (from prior class outcomes) to learn from.
+        if not history and len(self.memory.case_base) > 0:
+            dominant = profile.dominant_behaviors(top_k=5)
+            # Check if any labeled records exist before doing expensive retrieval
+            has_labeled = any(
+                rec.was_adhd is not None
+                for rec in self.memory.case_base._records[-500:]  # sample recent
+            )
+            if dominant and has_labeled:
+                similar = self.memory.retrieve_similar_cases(
+                    dominant, top_k=5, exclude_student_id=student.student_id,
+                )
+                strategy_scores: dict[str, float] = {}
+                for sim, record in similar:
+                    if record.action_taken and record.outcome == "positive":
+                        if record.was_adhd is True:
+                            strategy_scores[record.action_taken] = (
+                                strategy_scores.get(record.action_taken, 0.0) + sim * 1.5
+                            )
+                        elif record.was_adhd is None:
+                            strategy_scores[record.action_taken] = (
+                                strategy_scores.get(record.action_taken, 0.0) + sim
+                            )
+                        # skip was_adhd=False records
+                if strategy_scores:
+                    best_from_memory = max(strategy_scores, key=strategy_scores.get)  # type: ignore[arg-type]
+                    if best_from_memory in STRATEGIES:
+                        return best_from_memory
+
+        # Fall back to this student's own intervention history
         if history:
             best = max(history, key=lambda k: history[k])
             return best
 
+        # Fall back to state-based heuristics
+        return self._default_strategy(student)
+
+    def _default_strategy(self, student: Any) -> str:
+        """State-based fallback strategy selection."""
         distress = student.state.get("distress_level", 0.5)
         escalation = student.state.get("escalation_risk", 0.3)
         attention = student.state.get("attention", 0.5)
