@@ -540,9 +540,9 @@ async def _run_multi_student_session(ws, msg, profiles, scenarios):
 # V2 session — 950-turn ClassroomV2 environment
 # ---------------------------------------------------------------------------
 
-DEFAULT_V2_TURN_DELAY = 0.1
-MIN_V2_TURN_DELAY = 0.05
-MAX_V2_TURN_DELAY = 2.0
+DEFAULT_V2_TURN_DELAY = 1.5
+MIN_V2_TURN_DELAY = 0.3
+MAX_V2_TURN_DELAY = 5.0
 
 
 async def _run_v2_session(ws, msg):
@@ -627,11 +627,16 @@ async def _run_v2_session(ws, msg):
                         entry["is_adhd"] = s_data.get("is_adhd", False)
                     student_list.append(entry)
 
+                # Count ADHD students for UI
+                n_adhd = sum(1 for s in env.students if s.is_adhd)
+
                 await ws.send_json({
                     "type": "new_class",
                     "class_id": event.get("class_id", env.class_id),
                     "n_students": event.get("n_students", n_students),
+                    "n_adhd": n_adhd,
                     "max_turns": event.get("max_turns", env.MAX_TURNS),
+                    "archetype": event.get("archetype", ""),
                     "students": student_list,
                 })
                 continue
@@ -644,6 +649,14 @@ async def _run_v2_session(ws, msg):
             if ctrl.get("restart"):
                 break
 
+            # Inject names into student payloads (names generated at new_class)
+            raw_students = event.get("students", [])
+            enriched_students = []
+            for st in raw_students:
+                enriched = dict(st)
+                enriched["name"] = names.get(st.get("id", ""), st.get("id", ""))
+                enriched_students.append(enriched)
+
             turn_payload = {
                 "type": "turn",
                 "class_id": event.get("class_id", env.class_id),
@@ -652,19 +665,16 @@ async def _run_v2_session(ws, msg):
                 "period": event.get("period", 1),
                 "subject": event.get("subject", ""),
                 "location": event.get("location", "classroom"),
-                "students": event.get("students", []),
+                "students": enriched_students,
                 "teacher_action": event.get("teacher_action", {}),
-                # Structured interaction array from orchestrator
-                # Each item: {actor, target, event_type, content}
                 "interactions": event.get("interactions", []),
                 "managed_count": sum(
-                    1 for st in event.get("students", []) if st.get("is_managed")
+                    1 for st in raw_students if st.get("is_managed")
                 ),
+                "total_adhd": sum(1 for s in env.students if s.is_adhd),
                 "reward": event.get("reward", 0.0),
                 "memory_summary": event.get("memory_summary", ""),
             }
-            if _DEBUG_MODE and metrics is not None:
-                turn_payload["total_adhd"] = metrics.n_adhd
 
             await ws.send_json(turn_payload)
             await asyncio.sleep(ctrl["delay"])

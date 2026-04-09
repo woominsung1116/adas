@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, Component } from "react";
 import ClassroomView from "./components/ClassroomView";
 import StatePanel from "./components/StatePanel";
 import ChatLog from "./components/ChatLog";
@@ -7,6 +7,42 @@ import StudentGrid from "./components/StudentGrid";
 import GrowthPanel from "./components/GrowthPanel";
 
 const WS_URL = window.adas?.backendUrl || "ws://localhost:8000/ws";
+
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null, errorInfo: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, errorInfo) {
+    this.setState({ errorInfo });
+    console.error("ADAS ErrorBoundary:", error, errorInfo);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 32, background: "#0f172a", color: "#f87171", minHeight: "100vh", fontFamily: "monospace" }}>
+          <h2 style={{ color: "#fbbf24" }}>ADAS Crash Caught</h2>
+          <pre style={{ whiteSpace: "pre-wrap", fontSize: 13, color: "#e2e8f0" }}>
+            {this.state.error?.toString()}
+          </pre>
+          <pre style={{ whiteSpace: "pre-wrap", fontSize: 11, color: "#94a3b8", marginTop: 8 }}>
+            {this.state.errorInfo?.componentStack}
+          </pre>
+          <button
+            style={{ marginTop: 16, padding: "8px 16px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}
+            onClick={() => this.setState({ hasError: false, error: null, errorInfo: null })}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -17,7 +53,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
 
   // Mode
-  const [mode, setMode] = useState("classic");
+  const [mode, setMode] = useState("v2");
 
   // Multi-mode state (shared by multi + v2)
   const [students, setStudents] = useState([]);
@@ -29,7 +65,7 @@ export default function App() {
   const [totalAdhd, setTotalAdhd] = useState(0);
   const [growthData, setGrowthData] = useState(null);
   const [paused, setPaused] = useState(false);
-  const [speed, setSpeed] = useState(1.0);
+  const [speed, setSpeed] = useState(1.5);
   const [activeScenario, setActiveScenario] = useState(null);
 
   // V2-specific state
@@ -222,6 +258,15 @@ export default function App() {
     ? students.find((s) => s.id === teacherAction.student_id) || null
     : null;
 
+  const v2Info = {
+    day: v2Day,
+    period: v2Period,
+    subject: v2Subject,
+    location: v2Location,
+    maxTurns: v2MaxTurns,
+    archetype: v2Archetype,
+  };
+
   const multiStateProps = {
     focusedStudent,
     teacherAction,
@@ -233,16 +278,8 @@ export default function App() {
 
   const isMulti = mode === "multi" || mode === "v2";
 
-  const v2Info = {
-    day: v2Day,
-    period: v2Period,
-    subject: v2Subject,
-    location: v2Location,
-    maxTurns: v2MaxTurns,
-    archetype: v2Archetype,
-  };
-
   return (
+    <ErrorBoundary>
     <div style={styles.container}>
       <header style={styles.header}>
         <h1 style={styles.title}>ADAS</h1>
@@ -320,6 +357,7 @@ export default function App() {
         </div>
       </div>
     </div>
+    </ErrorBoundary>
   );
 }
 

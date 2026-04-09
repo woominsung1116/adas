@@ -84,16 +84,16 @@ function StudentCard({ student, isTargeted }) {
       </div>
 
       {/* Emotional indicators */}
-      {student.state && (student.state.distress > 0.4 || student.state.escalation > 0.4) && (
+      {student.state && ((student.state.distress ?? student.state.distress_level ?? 0) > 0.4 || (student.state.escalation ?? student.state.escalation_risk ?? 0) > 0.4) && (
         <div style={{ display: "flex", gap: 3, marginTop: 2 }}>
-          {student.state.distress > 0.4 && (
+          {(student.state.distress ?? student.state.distress_level ?? 0) > 0.4 && (
             <span style={{ fontSize: 8, color: "#ef4444", background: "#ef444422", padding: "0 3px", borderRadius: 2 }}>
-              distress {Math.round((student.state.distress ?? 0) * 100)}%
+              distress {Math.round((student.state.distress ?? student.state.distress_level ?? 0) * 100)}%
             </span>
           )}
-          {student.state.escalation > 0.4 && (
+          {(student.state.escalation ?? student.state.escalation_risk ?? 0) > 0.4 && (
             <span style={{ fontSize: 8, color: "#f59e0b", background: "#f59e0b22", padding: "0 3px", borderRadius: 2 }}>
-              esc {Math.round((student.state.escalation ?? 0) * 100)}%
+              esc {Math.round((student.state.escalation ?? student.state.escalation_risk ?? 0) * 100)}%
             </span>
           )}
         </div>

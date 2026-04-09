@@ -142,64 +142,106 @@ function studentColor(student) {
   return 0x4ade80;
 }
 
-// ── Draw a single pixel-art character ────────────────────────────────────
+// ── Draw a detailed pixel-art character ──────────────────────────────────
 function drawCharacter(g, x, y, hairColor, shirtColor, facing, frame, isTeacher) {
-  const scale = isTeacher ? 1.25 : 1.0;
-  const sx = (v) => v * scale;
+  const S = isTeacher ? 2.8 : 2.2;  // base pixel size
 
   // Shadow
-  g.fillStyle(0x000000, 0.15);
-  g.fillEllipse(x, y + sx(11), sx(12), sx(4));
+  g.fillStyle(0x000000, 0.25);
+  g.fillEllipse(x, y + S * 14, S * 8, S * 3);
 
-  // Body (shirt)
-  g.fillStyle(shirtColor);
-  g.fillRect(x - sx(4), y + sx(2), sx(8), sx(7));
-
-  // Legs (walk frame)
+  // ── Legs + Shoes ──
+  const shoeColor = 0x443322;
   g.fillStyle(PAL.pants);
   if (frame === 0) {
-    g.fillRect(x - sx(3), y + sx(9), sx(3), sx(3));
-    g.fillRect(x + sx(1), y + sx(9), sx(3), sx(3));
+    // standing / walk frame A
+    g.fillRect(x - S * 3, y + S * 9, S * 2.5, S * 4);
+    g.fillRect(x + S * 0.5, y + S * 9, S * 2.5, S * 4);
+    g.fillStyle(shoeColor);
+    g.fillRect(x - S * 3, y + S * 12.5, S * 3, S * 1.5);
+    g.fillRect(x + S * 0.5, y + S * 12.5, S * 3, S * 1.5);
   } else {
-    g.fillRect(x - sx(2), y + sx(9), sx(3), sx(3));
-    g.fillRect(x, y + sx(9), sx(3), sx(3));
+    // walk frame B
+    g.fillRect(x - S * 2, y + S * 9, S * 2.5, S * 5);
+    g.fillRect(x + S * 1, y + S * 9, S * 2.5, S * 3.5);
+    g.fillStyle(shoeColor);
+    g.fillRect(x - S * 2, y + S * 13.5, S * 3, S * 1.5);
+    g.fillRect(x + S * 1, y + S * 12, S * 3, S * 1.5);
   }
 
-  // Head (skin)
+  // ── Body / Shirt ──
+  g.fillStyle(shirtColor);
+  g.fillRect(x - S * 4, y + S * 2, S * 8, S * 7.5);
+  // Shirt collar / neckline
+  const collarColor = isTeacher ? 0xffffff : ((shirtColor & 0xfefefe) >> 1) + 0x808080;
+  g.fillStyle(collarColor, 0.6);
+  g.fillRect(x - S * 1.5, y + S * 1.5, S * 3, S * 1);
+
+  // ── Arms ──
+  g.fillStyle(shirtColor);
+  // Left arm
+  g.fillRect(x - S * 5.5, y + S * 3, S * 2, S * 5);
+  // Right arm
+  g.fillRect(x + S * 3.5, y + S * 3, S * 2, S * 5);
+  // Hands (skin)
   g.fillStyle(PAL.skinTone);
-  g.fillRect(x - sx(4), y - sx(6), sx(8), sx(8));
+  g.fillRect(x - S * 5.5, y + S * 7.5, S * 2, S * 1.5);
+  g.fillRect(x + S * 3.5, y + S * 7.5, S * 2, S * 1.5);
 
-  // Hair
+  // ── Head ──
+  g.fillStyle(PAL.skinTone);
+  g.fillRect(x - S * 4, y - S * 7, S * 8, S * 9);
+
+  // ── Hair ──
   g.fillStyle(hairColor);
+  // Top of head
+  g.fillRect(x - S * 4.5, y - S * 8, S * 9, S * 4);
   if (facing === "up") {
-    g.fillRect(x - sx(4), y - sx(6), sx(8), sx(4));
-    g.fillRect(x - sx(4), y - sx(6), sx(2), sx(6));
-    g.fillRect(x + sx(2), y - sx(6), sx(2), sx(6));
+    g.fillRect(x - S * 4.5, y - S * 8, S * 9, S * 9);
   } else if (facing === "left") {
-    g.fillRect(x - sx(4), y - sx(6), sx(8), sx(4));
-    g.fillRect(x - sx(4), y - sx(6), sx(3), sx(7));
+    g.fillRect(x - S * 4.5, y - S * 8, S * 4, S * 8);
+    g.fillRect(x - S * 4.5, y - S * 8, S * 9, S * 4);
   } else if (facing === "right") {
-    g.fillRect(x - sx(4), y - sx(6), sx(8), sx(4));
-    g.fillRect(x + sx(1), y - sx(6), sx(3), sx(7));
+    g.fillRect(x + S * 0.5, y - S * 8, S * 4, S * 8);
+    g.fillRect(x - S * 4.5, y - S * 8, S * 9, S * 4);
   } else {
-    // down (default)
-    g.fillRect(x - sx(4), y - sx(6), sx(8), sx(4));
-    g.fillRect(x - sx(4), y - sx(6), sx(2), sx(6));
-    g.fillRect(x + sx(2), y - sx(6), sx(2), sx(6));
+    // down — show bangs
+    g.fillRect(x - S * 4.5, y - S * 8, S * 9, S * 4);
+    g.fillRect(x - S * 4.5, y - S * 8, S * 2, S * 6);
+    g.fillRect(x + S * 2.5, y - S * 8, S * 2, S * 6);
   }
 
-  // Eyes (visible when facing down, left, right)
+  // ── Face (visible when not facing up) ──
   if (facing !== "up") {
+    const fOff = facing === "left" ? -S * 1 : facing === "right" ? S * 1 : 0;
+    // Eyes
+    g.fillStyle(0xffffff);
+    g.fillRect(x - S * 2.5 + fOff, y - S * 3, S * 2, S * 2);
+    g.fillRect(x + S * 0.5 + fOff, y - S * 3, S * 2, S * 2);
     g.fillStyle(PAL.eyes);
-    const eyeOffX = facing === "left" ? -1 : facing === "right" ? 1 : 0;
-    g.fillRect(x - sx(2) + eyeOffX, y - sx(2), sx(1.5), sx(1.5));
-    g.fillRect(x + sx(1) + eyeOffX, y - sx(2), sx(1.5), sx(1.5));
+    g.fillRect(x - S * 2 + fOff, y - S * 2.5, S * 1.2, S * 1.2);
+    g.fillRect(x + S * 1 + fOff, y - S * 2.5, S * 1.2, S * 1.2);
+    // Mouth
+    g.fillStyle(0xcc8866);
+    g.fillRect(x - S * 0.5 + fOff, y + S * 0.5, S * 1, S * 0.5);
+    // Cheek blush
+    g.fillStyle(0xffaaaa, 0.3);
+    g.fillRect(x - S * 3 + fOff, y - S * 0.5, S * 1.5, S * 1);
+    g.fillRect(x + S * 1.5 + fOff, y - S * 0.5, S * 1.5, S * 1);
   }
 
-  // Teacher marker: small white collar
+  // ── Teacher: glasses + tie ──
   if (isTeacher) {
-    g.fillStyle(0xffffff, 0.7);
-    g.fillRect(x - sx(2), y + sx(1), sx(4), sx(1.5));
+    if (facing !== "up") {
+      const fOff = facing === "left" ? -S * 1 : facing === "right" ? S * 1 : 0;
+      g.lineStyle(1, 0x444444, 0.8);
+      g.strokeRect(x - S * 3 + fOff, y - S * 3.5, S * 2.5, S * 2.5);
+      g.strokeRect(x + S * 0.5 + fOff, y - S * 3.5, S * 2.5, S * 2.5);
+      g.lineStyle(0);
+    }
+    // Tie
+    g.fillStyle(0xcc3333);
+    g.fillTriangle(x - S * 0.8, y + S * 2, x + S * 0.8, y + S * 2, x, y + S * 5);
   }
 }
 
@@ -253,7 +295,7 @@ class UnifiedSchoolScene extends Phaser.Scene {
     const W = this.scale.width;   // 800
     const H = this.scale.height;  // 750
 
-    // ── Layer 0: Background image (top 620px) ──
+    // ── Layer 0: Background image (full opacity — this IS the world) ──
     this.bgImage = this.add.image(0, 0, "classroom").setOrigin(0, 0);
     this.bgImage.setDisplaySize(800, 620);
 
@@ -327,68 +369,56 @@ class UnifiedSchoolScene extends Phaser.Scene {
     this._drawOverlaysAndHighlight("classroom");
   }
 
-  // ── Initialize character sprites at default positions ──────────────────
+  // ── Initialize character position data (no sprites — background has the characters) ──
   _initCharacters() {
     const desks = AREA_POSITIONS.classroom.desks;
     const teacherPos = AREA_POSITIONS.classroom.teacher;
 
-    // Teacher
-    const tp = CHARACTER_PROFILES[0];
-    this.characters.set(tp.id, {
+    // Teacher — position data only, teacher focus indicator will animate
+    this.characters.set("teacher", {
       x: teacherPos.x, y: teacherPos.y,
       targetX: teacherPos.x, targetY: teacherPos.y,
-      hair: tp.hair, shirt: tp.shirt,
       facing: "down", frame: 0, frameCounter: 0,
       isTeacher: true,
     });
 
-    // Students
+    // Students — fixed desk positions matching background characters
     for (let i = 1; i < CHARACTER_PROFILES.length; i++) {
       const p = CHARACTER_PROFILES[i];
       const pos = desks[(i - 1) % desks.length];
       this.characters.set(p.id, {
         x: pos.x, y: pos.y,
         targetX: pos.x, targetY: pos.y,
-        hair: p.hair, shirt: p.shirt,
         facing: "down", frame: 0, frameCounter: 0,
         isTeacher: false,
       });
     }
+
+    // Teacher focus indicator — a glowing circle that moves to target student
+    this._teacherFocus = { x: teacherPos.x, y: teacherPos.y, targetX: teacherPos.x, targetY: teacherPos.y };
   }
 
-  // ── Per-frame update: move characters toward targets + redraw ──────────
+  // ── Per-frame update: animate teacher focus indicator ───────────────────
   update() {
     this._frameCount++;
-    const SPEED = 2;
-    let anyMoved = false;
 
-    this.characters.forEach((ch) => {
-      const dx = ch.targetX - ch.x;
-      const dy = ch.targetY - ch.y;
+    // Smoothly move teacher focus indicator toward target
+    if (this._teacherFocus) {
+      const tf = this._teacherFocus;
+      const dx = tf.targetX - tf.x;
+      const dy = tf.targetY - tf.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-
+      const SPEED = 3;
       if (dist > SPEED) {
-        // Move toward target
-        ch.x += (dx / dist) * SPEED;
-        ch.y += (dy / dist) * SPEED;
-        ch.facing = getFacing(dx, dy);
-        anyMoved = true;
-
-        // Walk animation: toggle frame every 8 game frames
-        ch.frameCounter++;
-        if (ch.frameCounter >= 8) {
-          ch.frame = ch.frame === 0 ? 1 : 0;
-          ch.frameCounter = 0;
-        }
+        tf.x += (dx / dist) * SPEED;
+        tf.y += (dy / dist) * SPEED;
       } else {
-        // Snap to target, idle
-        ch.x = ch.targetX;
-        ch.y = ch.targetY;
-        ch.frameCounter = 0;
+        tf.x = tf.targetX;
+        tf.y = tf.targetY;
       }
-    });
+    }
 
-    // Redraw characters every frame (they layer on top of everything)
+    // Draw overlay indicators
     this._drawAllCharacters();
 
     // Draw and fade interaction lines
@@ -401,37 +431,84 @@ class UnifiedSchoolScene extends Phaser.Scene {
     this.characterGraphics.clear();
     const g = this.characterGraphics;
 
-    // Sort by y for depth ordering
-    const sorted = [...this.characters.values()].sort((a, b) => a.y - b.y);
+    // Destroy old labels
+    if (this._nameLabels) {
+      this._nameLabels.forEach((t) => t.destroy());
+    }
+    this._nameLabels = [];
 
-    sorted.forEach((ch) => {
-      drawCharacter(
-        g, ch.x, ch.y,
-        ch.hair, ch.shirt,
-        ch.facing, ch.frame,
-        ch.isTeacher
-      );
+    // ── Teacher focus indicator (animated glow that moves between students) ──
+    if (this._teacherFocus) {
+      const tf = this._teacherFocus;
+      const pulse = 0.5 + 0.5 * Math.sin(this._frameCount * 0.06);
 
-      // Status indicator dot above head
-      if (ch._simData) {
-        const statusCol = studentColor(ch._simData);
-        const size = ch.isTeacher ? 1.25 : 1.0;
-        g.fillStyle(statusCol, 0.9);
-        g.fillCircle(ch.x, ch.y - 8 * size - 4, 3);
+      // Outer soft glow
+      g.fillStyle(0xfbbf24, 0.08 + 0.05 * pulse);
+      g.fillCircle(tf.x, tf.y, 36);
+
+      // Main ring
+      g.lineStyle(2.5, 0xfbbf24, 0.7 + 0.3 * pulse);
+      g.strokeCircle(tf.x, tf.y, 26);
+
+      // Inner ring
+      g.lineStyle(1, 0xffffff, 0.3 + 0.2 * pulse);
+      g.strokeCircle(tf.x, tf.y, 22);
+
+      // "선생님" label follows the focus
+      const tLabel = this.add.text(tf.x, tf.y - 32, "선생님", {
+        fontSize: "9px",
+        fontFamily: "'Pretendard', sans-serif",
+        color: "#fbbf24",
+        stroke: "#000000",
+        strokeThickness: 2,
+        fontStyle: "bold",
+      }).setOrigin(0.5, 1).setDepth(1001);
+      this._nameLabels.push(tLabel);
+    }
+
+    // ── Student overlays (on top of background characters) ──
+    this.characters.forEach((ch) => {
+      if (ch.isTeacher) return; // teacher shown as focus indicator
+      if (!ch._simData) return;
+
+      const isTarget = ch._simId === this.targetStudentId;
+      const statusCol = studentColor(ch._simData);
+
+      // Status dot (small colored circle near the character)
+      g.fillStyle(statusCol, 0.9);
+      g.fillCircle(ch.x + 18, ch.y - 18, 4);
+
+      // ADHD identified — blue underline
+      if (ch._simData.is_identified) {
+        g.lineStyle(2, 0x60a5fa, 0.85);
+        g.lineBetween(ch.x - 16, ch.y + 22, ch.x + 16, ch.y + 22);
+        // Blue badge dot
+        g.fillStyle(0x60a5fa, 0.9);
+        g.fillCircle(ch.x - 18, ch.y - 18, 4);
       }
 
-      // ADHD identified ring
-      if (ch._simData?.is_identified) {
-        const size = ch.isTeacher ? 14 : 11;
-        g.lineStyle(1.5, 0x60a5fa, 0.8);
-        g.strokeCircle(ch.x, ch.y, size + 2);
+      // Managed — purple corner marks
+      if (ch._simData.is_managed) {
+        g.lineStyle(2, 0xa855f7, 0.8);
+        g.lineBetween(ch.x - 18, ch.y - 14, ch.x - 18, ch.y - 6);
+        g.lineBetween(ch.x - 18, ch.y - 14, ch.x - 10, ch.y - 14);
+        g.lineBetween(ch.x + 18, ch.y + 18, ch.x + 18, ch.y + 10);
+        g.lineBetween(ch.x + 18, ch.y + 18, ch.x + 10, ch.y + 18);
       }
 
-      // Managed checkmark dot
-      if (ch._simData?.is_managed) {
-        const size = ch.isTeacher ? 1.25 : 1.0;
-        g.fillStyle(0xa855f7, 0.9);
-        g.fillCircle(ch.x, ch.y - 8 * size - 4, 3);
+      // Name label above the background character
+      const name = ch._simData?.name || ch._simId || "";
+      if (name) {
+        const color = isTarget ? "#fbbf24" : ch._simData.is_identified ? "#93c5fd" : "#e2e8f0";
+        const label = this.add.text(ch.x, ch.y - 26, name, {
+          fontSize: isTarget ? "10px" : "8px",
+          fontFamily: "'Pretendard', sans-serif",
+          color,
+          stroke: "#000000",
+          strokeThickness: 2,
+          fontStyle: isTarget ? "bold" : "normal",
+        }).setOrigin(0.5, 1).setDepth(1000);
+        this._nameLabels.push(label);
       }
     });
   }
@@ -486,41 +563,7 @@ class UnifiedSchoolScene extends Phaser.Scene {
     if (!this.overlayGraphics) return;
     this.overlayGraphics.clear();
     this.highlightGraphics.clear();
-
-    const DIM = 0.35;
-
-    Object.entries(AREAS).forEach(([key, area]) => {
-      if (key === activeArea) return;
-      this.overlayGraphics.fillStyle(PAL.border, DIM);
-      this.overlayGraphics.fillRect(area.x, area.y, area.w, area.h);
-    });
-
-    // Glow border on active area
-    const active = AREAS[activeArea];
-    if (active) {
-      const hg = this.highlightGraphics;
-      const c = active.color;
-      hg.lineStyle(3, c, 0.85);
-      hg.strokeRect(active.x + 2, active.y + 2, active.w - 4, active.h - 4);
-      hg.lineStyle(1, c, 0.35);
-      hg.strokeRect(active.x + 6, active.y + 6, active.w - 12, active.h - 12);
-      // Corner accents
-      const cLen = 20;
-      hg.lineStyle(4, c, 0.9);
-      hg.strokeLine(active.x + 2, active.y + 2, active.x + 2 + cLen, active.y + 2);
-      hg.strokeLine(active.x + 2, active.y + 2, active.x + 2, active.y + 2 + cLen);
-      hg.strokeLine(active.x + active.w - 2, active.y + 2, active.x + active.w - 2 - cLen, active.y + 2);
-      hg.strokeLine(active.x + active.w - 2, active.y + 2, active.x + active.w - 2, active.y + 2 + cLen);
-      hg.strokeLine(active.x + 2, active.y + active.h - 2, active.x + 2 + cLen, active.y + active.h - 2);
-      hg.strokeLine(active.x + 2, active.y + active.h - 2, active.x + 2, active.y + active.h - 2 - cLen);
-      hg.strokeLine(active.x + active.w - 2, active.y + active.h - 2, active.x + active.w - 2 - cLen, active.y + active.h - 2);
-      hg.strokeLine(active.x + active.w - 2, active.y + active.h - 2, active.x + active.w - 2, active.y + active.h - 2 - cLen);
-    }
-
-    // Label brightness
-    Object.entries(this.areaLabelTexts).forEach(([key, { t }]) => {
-      t.setAlpha(key === activeArea ? 1.0 : 0.55);
-    });
+    // No dim overlays, no borders — show the full map evenly
   }
 
   // ── Set active area with transition ────────────────────────────────────
@@ -764,70 +807,23 @@ class UnifiedSchoolScene extends Phaser.Scene {
   updateMultiState(students, teacherAction, turn, classId, scenario, v2Location) {
     const actionType = teacherAction?.action_type || "";
     const targetId = teacherAction?.student_id || null;
-    // V2 provides location directly; multi mode derives it from scenario
-    const area = v2Location || deriveArea(scenario, actionType, turn, null);
+    this.targetStudentId = targetId; // Store for indicator rendering
 
-    if (area !== this.activeArea) {
-      this.setActiveArea(area);
-    }
-
-    // Map simulation students to character profiles
+    // Map simulation students to character profiles (for name/state data)
     this._mapStudentsToCharacters(students);
 
-    // Find the character profile id that maps to the target simulation student
-    let targetCharId = null;
-    if (targetId) {
-      this.characters.forEach((ch, id) => {
-        if (ch._simId === targetId) targetCharId = id;
+    // Move teacher focus indicator to targeted student position
+    if (targetId && this._teacherFocus) {
+      // Find the character position for the target
+      let targetPos = null;
+      this.characters.forEach((ch) => {
+        if (ch._simId === targetId) targetPos = { x: ch.x, y: ch.y };
       });
-    }
-
-    // If private_correction, move target to office, teacher follows
-    if (actionType === "private_correction" && targetCharId) {
-      this._assignTargets("classroom", null); // everyone stays in classroom
-      const targetCh = this.characters.get(targetCharId);
-      const teacherCh = this.characters.get("teacher");
-      if (targetCh) {
-        targetCh.targetX = AREA_POSITIONS.office.seats[0].x;
-        targetCh.targetY = AREA_POSITIONS.office.seats[0].y;
-      }
-      if (teacherCh) {
-        teacherCh.targetX = AREA_POSITIONS.office.teacher.x;
-        teacherCh.targetY = AREA_POSITIONS.office.teacher.y;
-      }
-    } else {
-      this._assignTargets(area, targetCharId);
-    }
-
-    // If observe, move teacher toward targeted student
-    if (actionType === "observe" && targetCharId) {
-      const targetCh = this.characters.get(targetCharId);
-      const teacherCh = this.characters.get("teacher");
-      if (targetCh && teacherCh) {
-        teacherCh.targetX = targetCh.targetX + 20;
-        teacherCh.targetY = targetCh.targetY - 10;
+      if (targetPos) {
+        this._teacherFocus.targetX = targetPos.x;
+        this._teacherFocus.targetY = targetPos.y;
       }
     }
-
-    // Update shirt color based on student risk state
-    students.forEach((student, idx) => {
-      const profileIdx = idx + 1;
-      if (profileIdx >= CHARACTER_PROFILES.length) return;
-      const profileId = CHARACTER_PROFILES[profileIdx].id;
-      const ch = this.characters.get(profileId);
-      if (!ch) return;
-      const color = studentColor(student);
-      // Tint shirt slightly based on risk (blend with original)
-      if (color === 0xef4444) {
-        ch.shirt = 0xcc5555; // red-ish tint
-      } else if (color === 0xf59e0b) {
-        ch.shirt = 0xccaa44; // yellow-ish tint
-      } else if (color === 0xa855f7) {
-        ch.shirt = 0x9966cc; // purple managed
-      } else {
-        ch.shirt = CHARACTER_PROFILES[profileIdx].shirt; // original
-      }
-    });
 
     if (this.turnText) {
       this.turnText.setText(`T${turn} C${classId}`);

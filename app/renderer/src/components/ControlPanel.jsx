@@ -46,30 +46,7 @@ export default function ControlPanel({
     <div style={styles.container}>
       <div style={styles.title}>Simulation Control</div>
 
-      {/* Mode toggle */}
-      <div style={styles.modeRow}>
-        <button
-          style={{ ...styles.modeBtn, ...(mode === "classic" ? styles.modeBtnActive : {}) }}
-          onClick={() => onModeChange("classic")}
-          disabled={running}
-        >
-          Classic
-        </button>
-        <button
-          style={{ ...styles.modeBtn, ...(mode === "multi" ? styles.modeBtnActive : {}) }}
-          onClick={() => onModeChange("multi")}
-          disabled={running}
-        >
-          Multi
-        </button>
-        <button
-          style={{ ...styles.modeBtn, ...(mode === "v2" ? styles.modeBtnActive : {}) }}
-          onClick={() => onModeChange("v2")}
-          disabled={running}
-        >
-          V2 (950턴)
-        </button>
-      </div>
+      {/* V2 mode only — classic/multi removed */}
 
       {/* Classic-only: profile & scenario selectors */}
       {mode === "classic" && (
@@ -158,16 +135,16 @@ export default function ControlPanel({
           </label>
           <input
             type="range"
-            min="0.2"
-            max="2.0"
+            min="0.3"
+            max="5.0"
             step="0.1"
-            value={speed ?? 1.0}
+            value={speed ?? 1.5}
             onChange={(e) => onSpeedChange(parseFloat(e.target.value))}
             style={styles.slider}
           />
           <div style={{ display: "flex", justifyContent: "space-between" }}>
-            <span style={styles.sliderLabel}>빠름 0.2s</span>
-            <span style={styles.sliderLabel}>느림 2.0s</span>
+            <span style={styles.sliderLabel}>빠름 0.3s</span>
+            <span style={styles.sliderLabel}>느림 5.0s</span>
           </div>
         </div>
       )}
