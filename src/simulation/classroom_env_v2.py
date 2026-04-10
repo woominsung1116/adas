@@ -634,6 +634,12 @@ class ClassroomV2:
         if archetype is not None:
             self.set_archetype(archetype)
 
+        # Situational modulator — environmental factors (§25.10, §25.13)
+        # Lazy-loaded to avoid import cycles; initialized on first use.
+        self._situational_modulator = None
+        self._enable_situational_modulation: bool = True
+        self._last_modulation = None  # cached for observation building
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -670,12 +676,65 @@ class ClassroomV2:
         self.daily_schedule = self._generate_daily_schedule()
         return self._make_observation()
 
+    def _get_situational_modulator(self):
+        """Lazy-init the situational modulator (avoids import cycle)."""
+        if self._situational_modulator is None and self._enable_situational_modulation:
+            try:
+                from src.simulation.situational_modulator import default_korean_k6_schedule
+                self._situational_modulator = default_korean_k6_schedule(total_turns=self.MAX_TURNS)
+            except Exception:
+                self._enable_situational_modulation = False  # graceful disable
+        return self._situational_modulator
+
+    def _apply_situational_modulation(self, modulation) -> None:
+        """Apply a ModulationVector to all students' observable state.
+
+        Modulation is applied BEFORE cognitive step so students react to it.
+        Effects are small per-turn offsets (clamped to [0, 1]).
+        """
+        if modulation is None:
+            return
+        for student in self.students:
+            s = student.state
+            # Global attention / compliance shifts
+            if modulation.global_attention != 0:
+                s["attention"] = max(0.0, min(1.0, s["attention"] + modulation.global_attention))
+            if modulation.global_compliance != 0:
+                s["compliance"] = max(0.0, min(1.0, s["compliance"] + modulation.global_compliance))
+            # Emotion shifts with profile amplification
+            amp = 1.0
+            if student.is_adhd and modulation.adhd_amplification != 1.0:
+                amp = modulation.adhd_amplification
+            elif student.profile_type == "anxiety" and modulation.anxiety_amplification != 1.0:
+                amp = modulation.anxiety_amplification
+            elif student.profile_type == "odd" and modulation.odd_amplification != 1.0:
+                amp = modulation.odd_amplification
+            if modulation.global_anxiety != 0:
+                student.emotions.anxiety = max(0.0, min(1.0,
+                    student.emotions.anxiety + modulation.global_anxiety * amp))
+            if modulation.global_frustration != 0:
+                student.emotions.frustration = max(0.0, min(1.0,
+                    student.emotions.frustration + modulation.global_frustration * amp))
+            if modulation.global_excitement != 0:
+                student.emotions.excitement = max(0.0, min(1.0,
+                    student.emotions.excitement + modulation.global_excitement))
+            if modulation.global_loneliness != 0:
+                student.emotions.loneliness = max(0.0, min(1.0,
+                    student.emotions.loneliness + modulation.global_loneliness))
+
     def step(
         self, teacher_action: TeacherAction
     ) -> tuple[ClassroomObservation, float, bool, dict[str, Any]]:
         """Advance one turn (= one class period)."""
         self.turn += 1
         self._advance_time()
+
+        # Phase 0: Apply situational modulation (exam stress, diurnal, events)
+        modulator = self._get_situational_modulator()
+        if modulator is not None:
+            modulation = modulator.compute_modulation(turn=self.turn, period=self.period)
+            self._apply_situational_modulation(modulation)
+            self._last_modulation = modulation
 
         context = self._make_context(teacher_action)
 
@@ -712,6 +771,17 @@ class ClassroomV2:
             "interactions": interactions,
             "reward": reward,
         }
+        # Surface situational modulation status for downstream logging/UI
+        if self._last_modulation is not None:
+            info["situation"] = {
+                "exam_week": self._last_modulation.exam_week,
+                "peer_conflict": self._last_modulation.peer_conflict,
+                "substitute_teacher": self._last_modulation.substitute_teacher,
+                "presentation_active": self._last_modulation.presentation_active,
+                "post_lunch_dip": self._last_modulation.post_lunch_dip,
+                "class_stress": self._last_modulation.class_stress,
+                "class_disruption": self._last_modulation.class_disruption,
+            }
         return obs, reward, done, info
 
     def is_class_complete(self) -> bool:

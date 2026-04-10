@@ -1,0 +1,144 @@
+# ==============================================================================
+# Epidemiological Anchor Targets (Tier 2)
+# ==============================================================================
+#
+# Purpose: Population-level statistical constraints for autoresearch calibration
+# Weight in combined loss: 0.4 (secondary to naturalness patterns)
+#
+# Each target has a literature-derived range (NOT a single point).
+# Autoresearch passes if measured value falls within range.
+#
+# Primary source: data.md (Korean data only)
+#
+# Format:
+#   - name: identifier
+#     metric: function path (e.g., "prevalence.adhd_total")
+#     range: [min, max]
+#     weight: importance in Tier 2
+#     source: literature citation
+# ==============================================================================
+
+version: "1.0"
+created: "2026-04-10"
+tier: 2
+total_weight_in_combined_loss: 0.4
+
+targets:
+  # ----------------------------------------------------------------------
+  # Primary: ADHD prevalence (Korean community samples)
+  # ----------------------------------------------------------------------
+
+  - name: adhd_total_prevalence
+    metric: prevalence.adhd_total
+    range: [0.05, 0.09]
+    weight: 1.0
+    source: "JKMS 2017 Kim et al. (N=49573, 천안 초등학생) 8.5%; 시화반월 9.4%; 전라북도 K-ARS 연구"
+    note: "한국 커뮤니티 표본의 폭 5-9% 수용"
+
+  - name: adhd_inattentive_prevalence
+    metric: prevalence.adhd_inattentive
+    range: [0.035, 0.065]
+    weight: 0.7
+    source: "JKMS 2017: 부주의 5.0%"
+
+  - name: adhd_hyperactive_prevalence
+    metric: prevalence.adhd_hyperactive
+    range: [0.015, 0.030]
+    weight: 0.6
+    source: "JKMS 2017: 과잉행동-충동 2.3%"
+
+  - name: adhd_combined_prevalence
+    metric: prevalence.adhd_combined
+    range: [0.015, 0.030]
+    weight: 0.6
+    source: "JKMS 2017: 복합형 2.3%"
+
+  # ----------------------------------------------------------------------
+  # Gender ratio (Korean referral + community data)
+  # ----------------------------------------------------------------------
+
+  - name: adhd_male_female_ratio
+    metric: prevalence.adhd_male_to_female_ratio
+    range: [2.0, 3.5]
+    weight: 0.7
+    source: "JKMS 2017 남 11.7% 여 5.2% (비율 2.25); 시화반월 남아 3.19배"
+    note: "교사 referral 에서는 더 높은 경향 (여아 과소식별)"
+
+  # ----------------------------------------------------------------------
+  # Comorbidity rates (Korean + MTA)
+  # ----------------------------------------------------------------------
+
+  - name: odd_comorbidity_in_adhd
+    metric: comorbidity.odd_in_adhd
+    range: [0.35, 0.45]
+    weight: 0.6
+    source: "MTA 1999 ADHD+ODD 40%; 한국 김붕년 연구 35-45%"
+
+  - name: anxiety_comorbidity_in_adhd
+    metric: comorbidity.anxiety_in_adhd
+    range: [0.25, 0.30]
+    weight: 0.5
+    source: "MTA 1999 ADHD+anxiety 34%; 한국 25-30%"
+
+  - name: depression_comorbidity_in_adhd
+    metric: comorbidity.depression_in_adhd
+    range: [0.08, 0.20]
+    weight: 0.4
+    source: "Jensen 2001 MTA 14%; Daviss 2008 6-38%; 한국 유사"
+
+  - name: ld_comorbidity_in_adhd
+    metric: comorbidity.ld_in_adhd
+    range: [0.25, 0.45]
+    weight: 0.4
+    source: "DuPaul 2013 25-40%; Larson 2011 Pediatrics 46%"
+
+  # ----------------------------------------------------------------------
+  # Teacher identification rate (Korean teacher studies)
+  # ----------------------------------------------------------------------
+
+  - name: teacher_identification_within_semester
+    metric: teacher.identification_fraction_by_turn[475]
+    range: [0.40, 0.70]
+    weight: 0.5
+    source: "한국 교사 K-ARS 연구 + 11-20 회기 판별 (KCI ART002999339)"
+    note: "1학기 내 (turn 475) 교사가 ADHD 학생의 40-70% 감지"
+
+  - name: teacher_identification_by_year_end
+    metric: teacher.identification_fraction_by_turn[950]
+    range: [0.65, 0.90]
+    weight: 0.5
+    source: "1년 누적 교사 식별률 (한국 K-ARS 메타)"
+    note: "연말 (turn 950) 65-90% 도달"
+
+  # ----------------------------------------------------------------------
+  # Intervention response rates (Korean meta-analysis)
+  # ----------------------------------------------------------------------
+
+  - name: behavioral_intervention_effect_size
+    metric: intervention.mean_compliance_gain
+    range: [0.15, 0.35]
+    weight: 0.4
+    source: "정서행동장애연구 메타 (ART002911277): 개입 효과 67-100%; 정량화 하한"
+    note: "복합 행동 개입 평균 효과 (Cohen's d 아님, 비율)"
+
+  # ----------------------------------------------------------------------
+  # Task completion / academic engagement (normal distribution)
+  # ----------------------------------------------------------------------
+
+  - name: normal_student_on_task_rate
+    metric: behavior.normal_on_task_percentage
+    range: [0.70, 0.90]
+    weight: 0.5
+    source: "한국 일반 초등 교실 관찰 (ART002911277 기준선)"
+
+  - name: adhd_on_task_rate_reduction
+    metric: behavior.adhd_on_task_relative_to_normal
+    range: [0.40, 0.70]
+    weight: 0.6
+    source: "자기점검 프로그램 (ART002794420) 사전 측정"
+    note: "ADHD 학생의 on-task 비율이 normal의 40-70% 수준"
+
+metadata:
+  calibration_philosophy: "3-tier; Tier 2 serves as population-level anchor"
+  overfitting_protection: "Hard range enforcement, not point matching"
+  unit_note: "All rates as fractions [0,1], not percentages"

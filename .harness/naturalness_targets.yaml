@@ -1,0 +1,198 @@
+# ==============================================================================
+# Naturalness Pattern Targets (Tier 1) — PRIMARY calibration
+# ==============================================================================
+#
+# Purpose: "Does the simulation feel like a real Korean elementary classroom?"
+# Weight in combined loss: 0.6 (primary over epidemiology)
+#
+# Each target is a PATTERN described in published Korean classroom research.
+# Ranges are derived from the literature's qualitative + quantitative claims.
+# Autoresearch searches parameter space to match ALL patterns simultaneously.
+#
+# Primary sources: data.md (Korean classroom observation studies)
+#
+# Format:
+#   - name: identifier
+#     pattern: human-readable description of what the pattern captures
+#     metric: function path (e.g., "behavior.seat_leaving_ratio")
+#     range: [min, max]
+#     weight: importance in Tier 1
+#     source: literature citation
+# ==============================================================================
+
+version: "1.0"
+created: "2026-04-10"
+tier: 1
+total_weight_in_combined_loss: 0.6
+n_patterns: 15
+
+patterns:
+  # ----------------------------------------------------------------------
+  # Pattern 1: ADHD seat-leaving frequency
+  # ----------------------------------------------------------------------
+  - name: adhd_seat_leaving_ratio
+    pattern: "ADHD 학생은 일반 학생보다 자리이탈 3-5배 빈발"
+    metric: behavior.seat_leaving_adhd_normal_ratio
+    range: [2.5, 5.5]
+    weight: 1.0
+    source: "KCI ART002794420 자기점검 프로그램 (과잉행동 조작적 정의)"
+    note: "부분 구간 기록법 기준 (10초 간격)"
+
+  # ----------------------------------------------------------------------
+  # Pattern 2: On-task rate by class period (diurnal)
+  # ----------------------------------------------------------------------
+  - name: on_task_diurnal_curve
+    pattern: "1-2교시 80% → 5교시 60% 근처로 하락 (post-lunch dip)"
+    metric: behavior.on_task_by_period_curve
+    target_curve: [0.80, 0.78, 0.75, 0.68, 0.60, 0.62]  # 교시별 목표값
+    range_tolerance: 0.08  # 각 교시 ±0.08 허용
+    weight: 0.9
+    source: "Folkard 1975 post-lunch dip; 한국 수업시간 집중도 연구"
+
+  # ----------------------------------------------------------------------
+  # Pattern 3: Teacher first suspicion timing
+  # ----------------------------------------------------------------------
+  - name: teacher_first_suspicion_turn
+    pattern: "교사가 ADHD 의심 시작 시점 평균 2-3개월 (11-20회기)"
+    metric: teacher.first_suspicion_turn_median
+    range: [50, 120]  # Turn 50-120 (대략 1-2.5개월)
+    weight: 0.8
+    source: "KCI ART002999339 (11-20 회기, 주 1-2회 × 2-3개월)"
+    note: "중간값 기준, 분포 넓음 허용"
+
+  # ----------------------------------------------------------------------
+  # Pattern 4: Teacher identification by subtype
+  # ----------------------------------------------------------------------
+  - name: identification_rate_subtype_inattentive
+    pattern: "부주의형이 과잉행동/복합형보다 식별 느림"
+    metric: teacher.identification_rate.adhd_inattentive
+    range: [0.30, 0.65]
+    weight: 0.8
+    source: "Quinn & Madhoo 2014; 한국 교사 인식 연구"
+    note: "조용한 부주의형 과소식별 경향"
+
+  - name: identification_rate_subtype_hyperactive
+    pattern: "과잉행동형이 가장 빨리 식별됨"
+    metric: teacher.identification_rate.adhd_hyperactive_impulsive
+    range: [0.70, 0.95]
+    weight: 0.7
+    source: "Mowlem 2019; 관찰성 높음"
+
+  # ----------------------------------------------------------------------
+  # Pattern 5: Peer conflict rate (chaotic class)
+  # ----------------------------------------------------------------------
+  - name: peer_conflict_per_hour_chaotic
+    pattern: "혼란스러운 교실에서 시간당 또래 갈등 2-5건"
+    metric: behavior.peer_conflict_per_hour_chaotic_archetype
+    range: [2.0, 5.0]
+    weight: 0.6
+    source: "서울대 또래관계 연구 (50-60% 또래 어려움)"
+
+  # ----------------------------------------------------------------------
+  # Pattern 6: ADHD-I internalizing signature
+  # ----------------------------------------------------------------------
+  - name: adhd_i_shame_frustration_correlation
+    pattern: "ADHD-I 학생은 shame 과 frustration 이 함께 높음"
+    metric: profile_signature.adhd_i_shame_frustration_cooccurrence
+    range: [0.60, 0.90]
+    weight: 0.7
+    source: "K-CBCL 군집분석 (ART002650863)"
+
+  # ----------------------------------------------------------------------
+  # Pattern 7: ADHD-combined highest disruption
+  # ----------------------------------------------------------------------
+  - name: adhd_combined_compliance_lowest
+    pattern: "복합형이 모든 subtype 중 compliance 가 가장 낮음"
+    metric: profile_signature.compliance_rank_adhd_combined_last
+    range: [0.8, 1.0]  # 거의 항상 가장 낮음
+    weight: 0.6
+    source: "MTA Korea; 임상 관찰"
+
+  # ----------------------------------------------------------------------
+  # Pattern 8: Teacher patience attrition pattern
+  # ----------------------------------------------------------------------
+  - name: teacher_patience_diurnal_decline
+    pattern: "교사 인내심은 하루 진행되며 감소, 밤에 부분 회복"
+    metric: teacher.patience_end_of_day_vs_start_ratio
+    range: [0.75, 0.95]
+    weight: 0.5
+    source: "Maslach burnout; 한국 교사 스트레스 연구"
+    note: "일 종료 시점이 시작 대비 75-95% 수준"
+
+  # ----------------------------------------------------------------------
+  # Pattern 9: Anxiety-ADHD differential pattern
+  # ----------------------------------------------------------------------
+  - name: anxiety_avoidance_vs_adhd_impulsivity
+    pattern: "불안 학생은 회피+위축, ADHD-H는 개입+충동 — 서로 다른 외현"
+    metric: profile_signature.anxiety_adhd_behavior_divergence
+    range: [0.60, 0.90]
+    weight: 0.7
+    source: "Pliszka 1989; DSM-5 감별진단"
+    note: "행동 pool 오버랩 40% 미만이어야 함"
+
+  # ----------------------------------------------------------------------
+  # Pattern 10: ODD response to correction
+  # ----------------------------------------------------------------------
+  - name: odd_correction_escalation_rate
+    pattern: "ODD 학생은 교사 지적에 대해 escalation 으로 반응"
+    metric: behavior.odd_escalation_on_correction
+    range: [0.40, 0.70]
+    weight: 0.6
+    source: "DSM-5 313.81; Burke 2002"
+
+  # ----------------------------------------------------------------------
+  # Pattern 11: Gifted vs ADHD differential
+  # ----------------------------------------------------------------------
+  - name: gifted_completion_speed_vs_adhd
+    pattern: "영재는 과제 조기완료 후 지루함 행동; ADHD는 과제 회피"
+    metric: profile_signature.task_completion_speed_gifted_vs_adhd
+    range: [1.5, 3.0]  # 영재가 ADHD 의 1.5-3배 빠름
+    weight: 0.5
+    source: "한국 영재교육 연구; DSM-5 감별"
+
+  # ----------------------------------------------------------------------
+  # Pattern 12: Emotional contagion spatial spread
+  # ----------------------------------------------------------------------
+  - name: emotional_contagion_neighbor_effect
+    pattern: "학생의 정서 폭발이 주변 좌석 학생에게 전파 (5좌석 이내)"
+    metric: interaction.emotion_spread_within_5_seats_rate
+    range: [0.30, 0.70]
+    weight: 0.5
+    source: "Hatfield 1994 emotional contagion; 학급 역학 연구"
+
+  # ----------------------------------------------------------------------
+  # Pattern 13: Exam week variance increase
+  # ----------------------------------------------------------------------
+  - name: exam_week_behavior_variance_spike
+    pattern: "시험 주간에 모든 프로파일의 행동 variance 증가"
+    metric: behavior.variance_exam_week_vs_baseline
+    range: [1.2, 1.8]  # 시험 주간 variance 가 평상시의 1.2-1.8배
+    weight: 0.5
+    source: "Cassady 2002 test anxiety; Yerkes-Dodson"
+
+  # ----------------------------------------------------------------------
+  # Pattern 14: Gender recognition bias
+  # ----------------------------------------------------------------------
+  - name: adhd_i_girls_under_identified
+    pattern: "ADHD-I 여아가 남아보다 교사에게 덜 식별됨"
+    metric: bias.adhd_i_identification_female_vs_male
+    range: [0.55, 0.85]  # 여아 식별률이 남아의 55-85%
+    weight: 0.6
+    source: "Quinn & Madhoo 2014; Ohan & Visser 2009"
+
+  # ----------------------------------------------------------------------
+  # Pattern 15: Intervention success rate
+  # ----------------------------------------------------------------------
+  - name: empathic_intervention_compliance_boost
+    pattern: "공감적 개입이 compliance 를 상승시킴"
+    metric: intervention.empathic_compliance_gain
+    range: [0.10, 0.30]
+    weight: 0.6
+    source: "정서행동장애연구 메타 (ART002911277) 개입 효과 67-100%; 공감 트랙"
+
+metadata:
+  philosophy: "Multi-pattern matching over single-metric optimization"
+  note: "Autoresearch must satisfy ALL patterns (weighted), not just one"
+  overfitting_protection: "Pattern ranges are wide enough to prevent single-point overfit"
+  pattern_count: 15
+  primary_reference: "data.md 44 Korean studies"
