@@ -1,0 +1,367 @@
+# ==============================================================================
+# Student Parameter Ranges for Autoresearch Calibration
+# ==============================================================================
+#
+# Purpose: Define literature-informed search ranges for student parameters
+#          that autoresearch will calibrate against naturalness + epidemiology
+#          targets (see calibration_targets.yaml).
+#
+# Design principle (정리.md §25.11.10):
+#   - Student parameters = CALIBRATED via autoresearch (within ranges below)
+#   - Teacher parameters = FIXED from literature (not in this file)
+#
+# Each range is derived from published literature. Autoresearch searches
+# within these ranges — never outside. Ranges are intentionally conservative
+# to prevent extreme values.
+#
+# Format:
+#   param_name:
+#     range: [min, max]
+#     default: recommended_starting_point
+#     source: "literature citation"
+#     note: "why this range"
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# SECTION 1: Baseline Cognitive Parameters (normal_quiet baseline)
+# ------------------------------------------------------------------------------
+# These are the BASE values. Profile-specific values = base + delta (see section 2).
+
+base_cognitive:
+  att_bandwidth:
+    range: [2, 4]
+    default: 3
+    source: "Miller 1956 '7±2', adjusted for child developmental stage"
+    note: "How many events attended simultaneously"
+
+  vision_r:
+    range: [3, 5]
+    default: 4
+    source: "Korean classroom observation studies"
+    note: "Attention scan radius in classroom"
+
+  retention:
+    range: [4, 6]
+    default: 5
+    source: "Baddeley working memory model, child norms"
+    note: "Working memory slots"
+
+  recency_decay:
+    range: [0.98, 0.995]
+    default: 0.985
+    source: "Park et al. 2023 Generative Agents"
+    note: "Memory fade rate per turn"
+
+  importance_trigger:
+    range: [100.0, 170.0]
+    default: 135.0
+    source: "Park 2023 threshold adapted"
+    note: "Poignancy accumulation before reflection"
+
+  plan_consistency:
+    range: [0.75, 0.95]
+    default: 0.85
+    source: "Barkley 1997 executive function (normal range)"
+    note: "Probability of following plan vs switching"
+
+  impulse_override:
+    range: [0.03, 0.12]
+    default: 0.075
+    source: "Barkley 1997 behavioral inhibition normal range"
+    note: "Probability of impulsive override"
+
+  task_initiation_delay:
+    range: [0.0, 0.10]
+    default: 0.0
+    source: "Normal children show minimal initiation delay"
+    note: "Additional delay before task start"
+
+  social_sensitivity:
+    range: [0.30, 0.60]
+    default: 0.45
+    source: "Korean peer interaction studies"
+    note: "Responsiveness to peer cues"
+
+  conflict_tendency:
+    range: [0.03, 0.12]
+    default: 0.075
+    source: "Classroom observation baseline"
+    note: "Probability of initiating conflict"
+
+
+# ------------------------------------------------------------------------------
+# SECTION 2: Baseline Emotional State (normal_quiet baseline)
+# ------------------------------------------------------------------------------
+
+base_emotional:
+  frustration:
+    range: [0.05, 0.20]
+    default: 0.11
+    source: "K-CBCL normal child distribution"
+
+  shame:
+    range: [0.03, 0.15]
+    default: 0.08
+    source: "K-CBCL internalizing baseline"
+
+  anxiety:
+    range: [0.05, 0.18]
+    default: 0.11
+    source: "Korean child anxiety norms"
+
+  anger:
+    range: [0.03, 0.15]
+    default: 0.075
+    source: "K-CBCL externalizing baseline"
+
+  loneliness:
+    range: [0.03, 0.15]
+    default: 0.07
+    source: "Korean child peer research"
+
+  excitement:
+    range: [0.15, 0.30]
+    default: 0.225
+    source: "Positive affect normative data"
+
+  trust_in_teacher:
+    range: [0.55, 0.80]
+    default: 0.675
+    source: "Korean elementary teacher-student trust norms"
+
+  self_esteem:
+    range: [0.60, 0.80]
+    default: 0.71
+    source: "Korean child self-esteem meta-analysis"
+
+
+# ------------------------------------------------------------------------------
+# SECTION 3: ADHD-Inattentive Delta Ranges
+# ------------------------------------------------------------------------------
+
+adhd_inattentive_deltas:
+  cognitive:
+    att_bandwidth:
+      range: [-3, -1]
+      default: -2
+      source: "DSM-5 A1; Barkley 1997"
+    retention:
+      range: [-4, -2]
+      default: -3
+      source: "Working memory deficit in ADHD-I"
+    plan_consistency:
+      range: [-0.45, -0.25]
+      default: -0.35
+      source: "Barkley executive dysfunction"
+    task_initiation_delay:
+      range: [0.30, 0.50]
+      default: 0.40
+      source: "DSM-5 inattention criteria"
+
+  emotional:
+    frustration:
+      range: [0.12, 0.25]
+      default: 0.19
+      source: "Academic failure cumulation (meta-analysis)"
+    shame:
+      range: [0.10, 0.25]
+      default: 0.17
+      source: "K-CBCL internalizing in ADHD-I"
+    self_esteem:
+      range: [-0.35, -0.18]
+      default: -0.26
+      source: "Springer 2025 ADHD self-esteem meta-analysis (127 studies)"
+
+
+# ------------------------------------------------------------------------------
+# SECTION 4: ADHD-Hyperactive/Impulsive Delta Ranges
+# ------------------------------------------------------------------------------
+
+adhd_hyperactive_deltas:
+  cognitive:
+    impulse_override:
+      range: [0.25, 0.40]
+      default: 0.325
+      source: "DSM-5 H/I criteria; Barkley disinhibition"
+    plan_consistency:
+      range: [-0.55, -0.35]
+      default: -0.45
+      source: "Executive function deficit"
+    conflict_tendency:
+      range: [0.10, 0.25]
+      default: 0.175
+      source: "Korean ADHD peer conflict research"
+
+  emotional:
+    anger:
+      range: [0.12, 0.25]
+      default: 0.175
+      source: "Emotional dysregulation in ADHD-H"
+    excitement:
+      range: [0.10, 0.25]
+      default: 0.175
+      source: "Hyperarousal characteristic"
+
+
+# ------------------------------------------------------------------------------
+# SECTION 5: Dynamics — Emotion Decay Rates (per turn)
+# ------------------------------------------------------------------------------
+# How fast emotions return to baseline. Profile-specific.
+
+emotion_decay_rates:
+  normal_quiet:
+    frustration_decay: [0.02, 0.05]
+    anxiety_decay: [0.015, 0.04]
+    anger_decay: [0.03, 0.06]
+    shame_decay: [0.005, 0.02]  # slow
+
+  adhd_combined:
+    frustration_decay: [0.005, 0.020]   # slower recovery
+    anger_decay: [0.005, 0.025]
+    shame_decay: [0.002, 0.012]
+
+  anxiety:
+    anxiety_decay: [0.003, 0.015]  # chronic, slow decay
+    shame_decay: [0.003, 0.012]
+
+  odd:
+    anger_decay: [0.003, 0.015]  # persistent anger
+
+
+# ------------------------------------------------------------------------------
+# SECTION 6: Dynamics — Event Reactivity Coefficients
+# ------------------------------------------------------------------------------
+# How much a given event changes emotion. Profile-specific.
+
+event_reactivity:
+  teacher_correction:
+    normal_shame_reaction: [0.03, 0.10]
+    normal_frustration_reaction: [0.02, 0.08]
+
+    adhd_shame_reaction: [0.08, 0.20]       # amplified
+    adhd_frustration_reaction: [0.05, 0.15]
+
+    odd_anger_reaction: [0.15, 0.35]         # core: authority defiance
+    odd_shame_reaction: [-0.02, 0.05]        # low shame
+
+    anxiety_anxiety_reaction: [0.10, 0.25]   # amplified
+
+  peer_conflict:
+    normal_distress: [0.03, 0.10]
+    adhd_distress: [0.08, 0.18]
+    odd_anger: [0.15, 0.30]
+    anxiety_withdrawal: [0.10, 0.25]
+
+  praise:
+    normal_self_esteem_boost: [0.02, 0.08]
+    adhd_self_esteem_boost: [0.05, 0.15]   # higher impact (starved)
+    anxiety_self_esteem_boost: [0.03, 0.10]
+
+
+# ------------------------------------------------------------------------------
+# SECTION 7: Dynamics — Emotion → Cognition Coupling
+# ------------------------------------------------------------------------------
+# How much emotion temporarily modulates cognitive parameters.
+
+emotion_to_cognition_coupling:
+  frustration_on_attention:
+    # Higher frustration → lower attention
+    range: [0.3, 0.8]
+    default: 0.5
+    note: "att_bandwidth_effective = base - frustration * this_coefficient"
+
+  anxiety_on_vision_r:
+    # Higher anxiety → narrower scan (tunnel vision)
+    range: [0.2, 0.6]
+    default: 0.4
+
+  anger_on_impulse:
+    # Higher anger → more impulsive
+    range: [0.3, 0.7]
+    default: 0.5
+
+  self_esteem_on_initiation:
+    # Lower self_esteem → more task initiation delay
+    range: [0.2, 0.5]
+    default: 0.35
+
+
+# ------------------------------------------------------------------------------
+# SECTION 8: Comorbidity Interaction Strength
+# ------------------------------------------------------------------------------
+# For comorbid profiles, how much extra modification beyond additive base.
+
+comorbidity_interactions:
+  # Sparsity regularization — autoresearch prefers small interaction terms
+  # unless patterns clearly demand otherwise
+
+  adhd_i_plus_anxiety:
+    shame_synergy: [0.02, 0.12]              # extra shame beyond sum
+    plan_consistency_adjustment: [-0.05, 0.10]
+    sparsity_weight: 0.5                     # preferred to be small
+
+  adhd_h_plus_odd:
+    anger_synergy: [0.02, 0.10]
+    escalation_synergy: [0.02, 0.08]
+    sparsity_weight: 0.5
+
+  adhd_c_plus_odd:
+    # Worst combination — allow larger interaction
+    anger_synergy: [0.03, 0.12]
+    escalation_synergy: [0.03, 0.10]
+    sparsity_weight: 0.3
+
+  adhd_plus_depression:
+    task_initiation_synergy: [0.10, 0.25]    # dramatic amplification
+    self_esteem_decrement: [-0.30, -0.15]
+    sparsity_weight: 0.3
+
+
+# ------------------------------------------------------------------------------
+# SECTION 9: Hard Constraints (enforced regardless of ranges above)
+# ------------------------------------------------------------------------------
+
+constraints:
+  # ADHD-I must show attention deficit dominance over impulse
+  - profile: "adhd_inattentive"
+    rule: "abs(delta.cognitive.att_bandwidth) > abs(delta.cognitive.impulse_override)"
+    rationale: "DSM-5 classification logic"
+
+  # ADHD-H must show impulsivity dominance
+  - profile: "adhd_hyperactive_impulsive"
+    rule: "abs(delta.cognitive.impulse_override) > abs(delta.cognitive.att_bandwidth)"
+    rationale: "DSM-5 classification logic"
+
+  # Anxiety must have positive anxiety delta (monotonicity)
+  - profile: "anxiety"
+    rule: "delta.emotional.anxiety > 0"
+    rationale: "By definition"
+
+  # ODD must have positive anger delta
+  - profile: "odd"
+    rule: "delta.emotional.anger > 0"
+    rationale: "By definition"
+
+  # ADHD combined = at least as severe as ADHD-I or ADHD-H in each dimension
+  - profile: "adhd_combined"
+    rule: "delta magnitude >= max(adhd_inattentive, adhd_hyperactive_impulsive)"
+    rationale: "Clinical definition of combined subtype"
+
+
+# ------------------------------------------------------------------------------
+# SECTION 10: Autoresearch Metadata
+# ------------------------------------------------------------------------------
+
+metadata:
+  version: "1.0"
+  created: "2026-04-10"
+  philosophy: "Literature-informed ranges, autoresearch tunes within"
+  total_parameters: 62  # Approximate count
+  baseline_profile: "normal_quiet"
+  calibration_targets_file: "calibration_targets.yaml"
+  situational_ranges_file: "situational_ranges.yaml"
+  notes:
+    - "All ranges derived from published literature"
+    - "Autoresearch cannot search outside ranges"
+    - "Hard constraints override range intersections"
+    - "Comorbidity sparsity_weight: 0.5=default, 0.3=relaxed, 0.7=strict"
