@@ -4,7 +4,7 @@
 #
 # Purpose: Define literature-informed search ranges for student parameters
 #          that autoresearch will calibrate against naturalness + epidemiology
-#          targets (see calibration_targets.yaml).
+#          targets (see naturalness_targets.yaml + epidemiology_targets.yaml).
 #
 # Design principle (정리.md §25.11.10):
 #   - Student parameters = CALIBRATED via autoresearch (within ranges below)
@@ -358,7 +358,8 @@ metadata:
   philosophy: "Literature-informed ranges, autoresearch tunes within"
   total_parameters: 62  # Approximate count
   baseline_profile: "normal_quiet"
-  calibration_targets_file: "calibration_targets.yaml"
+  naturalness_targets_file: "naturalness_targets.yaml"
+  epidemiology_targets_file: "epidemiology_targets.yaml"
   situational_ranges_file: "situational_ranges.yaml"
   notes:
     - "All ranges derived from published literature"

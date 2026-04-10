@@ -171,7 +171,7 @@ BASE_OBSERVABLE: dict[str, float] = dict(
 #   }
 #
 # Ranges are documented alongside each delta for autoresearch calibration
-# (see .harness/objective_v2.yaml — to be created).
+# (see .harness/naturalness_targets.yaml + epidemiology_targets.yaml).
 # ---------------------------------------------------------------------------
 
 PROFILE_DELTAS: dict[str, dict] = {
@@ -739,15 +739,42 @@ BEHAVIOR_POOLS: dict[str, tuple[str, ...]] = {
 
 # Which behavior pools each profile type draws from (primary, secondary)
 _PROFILE_BEHAVIOR_MAP: dict[str, list[str]] = {
+    # ── Baseline / variants ───────────────────────────────────────────
     "normal_quiet": ["normal"],
     "normal_active": ["normal", "hyperactivity"],
+
+    # ── ADHD subtypes ─────────────────────────────────────────────────
     "adhd_inattentive": ["inattention", "normal"],
     "adhd_hyperactive_impulsive": ["hyperactivity", "impulsivity"],
     "adhd_combined": ["inattention", "hyperactivity", "impulsivity"],
+
+    # ── Other single disorders ────────────────────────────────────────
     "anxiety": ["anxiety", "normal"],
     "odd": ["odd", "impulsivity"],
     "gifted": ["gifted", "normal"],
     "sleep_deprived": ["inattention", "normal"],
+
+    # ── Comorbidity profiles (reuse pools — never new pools) ──────────
+    # ADHD-I + anxiety: inattention + internalizing signature
+    "adhd_i_plus_anxiety": ["inattention", "anxiety", "normal"],
+    # ADHD-H + ODD: most disruptive externalizing cluster
+    "adhd_h_plus_odd": ["hyperactivity", "impulsivity", "odd"],
+    # ADHD combined + ODD: inattention + full externalizing
+    "adhd_c_plus_odd": ["inattention", "hyperactivity", "impulsivity", "odd"],
+    # ADHD-I + LD: inattention dominant with academic task avoidance
+    "adhd_i_plus_ld": ["inattention", "anxiety", "normal"],
+    # ADHD + depression: task initiation collapse + internalizing
+    "adhd_plus_depression": ["inattention", "anxiety", "normal"],
+    # Anxiety + depression: pure internalizing distractor
+    "anxiety_plus_depression": ["anxiety", "normal"],
+
+    # ── Differential diagnosis distractors ───────────────────────────
+    # ASD-like: social withdrawal + routine-focused, minimal externalizing
+    "asd_like": ["anxiety", "normal"],
+    # Pure depression: anhedonia + inattention-like presentation
+    "depression": ["anxiety", "inattention", "normal"],
+    # Learning disorder: inattention-like from task difficulty + anxiety
+    "learning_disorder": ["inattention", "anxiety", "normal"],
 }
 
 

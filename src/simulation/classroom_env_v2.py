@@ -686,11 +686,75 @@ class ClassroomV2:
                 self._enable_situational_modulation = False  # graceful disable
         return self._situational_modulator
 
-    def _apply_situational_modulation(self, modulation) -> None:
-        """Apply a ModulationVector to all students' observable state.
+    def _snapshot_student_for_modulation(self, student) -> dict:
+        """Capture fields _apply_situational_modulation may touch.
 
-        Modulation is applied BEFORE cognitive step so students react to it.
-        Effects are small per-turn offsets (clamped to [0, 1]).
+        Used by the transient-modulation protocol in step():
+            baseline_snap = snapshot(student)       # pre-modulation
+            apply_modulation(student)
+            modulated_snap = snapshot(student)      # baseline + M (clamped)
+            student.step(...)                       # baseline + M + cognitive_delta
+            reapply_transient(student, baseline, modulated_snap)
+              → state = baseline + cognitive_delta  (modulation M removed)
+
+        This preserves cognitive-step updates while stripping the transient
+        situational offset, preventing drift accumulation over 950 turns.
+        """
+        return {
+            "attention": student.state.get("attention"),
+            "compliance": student.state.get("compliance"),
+            "anxiety": student.emotions.anxiety,
+            "frustration": student.emotions.frustration,
+            "excitement": student.emotions.excitement,
+            "loneliness": student.emotions.loneliness,
+        }
+
+    def _reapply_transient_modulation(
+        self, student, baseline: dict, modulated: dict
+    ) -> None:
+        """Strip transient modulation offset from student state.
+
+        Preserves cognitive_delta (post-step minus modulated-pre-step)
+        while restoring the baseline reference. Final state is:
+            state = baseline + (current - modulated)
+        """
+        # Observable state (dict) — only rewrite fields that were originally
+        # present on the student (avoids creating spurious keys)
+        current_att = student.state.get("attention")
+        if baseline["attention"] is not None and current_att is not None:
+            delta = current_att - modulated["attention"]
+            student.state["attention"] = max(0.0, min(1.0, baseline["attention"] + delta))
+
+        current_comp = student.state.get("compliance")
+        if baseline["compliance"] is not None and current_comp is not None:
+            delta = current_comp - modulated["compliance"]
+            student.state["compliance"] = max(0.0, min(1.0, baseline["compliance"] + delta))
+
+        # Emotions (dataclass attributes — always present)
+        for field in ("anxiety", "frustration", "excitement", "loneliness"):
+            current = getattr(student.emotions, field)
+            delta = current - modulated[field]
+            new_val = max(0.0, min(1.0, baseline[field] + delta))
+            setattr(student.emotions, field, new_val)
+
+    def _modulation_amplification(self, student, modulation) -> float:
+        """Return profile-specific amplification coefficient for emotion shifts."""
+        if student.is_adhd and modulation.adhd_amplification != 1.0:
+            return modulation.adhd_amplification
+        if student.profile_type == "anxiety" and modulation.anxiety_amplification != 1.0:
+            return modulation.anxiety_amplification
+        if student.profile_type == "odd" and modulation.odd_amplification != 1.0:
+            return modulation.odd_amplification
+        return 1.0
+
+    def _apply_situational_modulation(self, modulation) -> None:
+        """Apply a ModulationVector in-place to student state/emotions.
+
+        IMPORTANT: This mutates student.state / student.emotions. Callers must
+        restore state via snapshots (see step()) so modulation is TRANSIENT
+        — applied for the duration of one turn's cognitive cycle only, and
+        never persists beyond the turn boundary. Repeated application would
+        otherwise accumulate drift over 950 turns and corrupt calibration.
         """
         if modulation is None:
             return
@@ -702,13 +766,7 @@ class ClassroomV2:
             if modulation.global_compliance != 0:
                 s["compliance"] = max(0.0, min(1.0, s["compliance"] + modulation.global_compliance))
             # Emotion shifts with profile amplification
-            amp = 1.0
-            if student.is_adhd and modulation.adhd_amplification != 1.0:
-                amp = modulation.adhd_amplification
-            elif student.profile_type == "anxiety" and modulation.anxiety_amplification != 1.0:
-                amp = modulation.anxiety_amplification
-            elif student.profile_type == "odd" and modulation.odd_amplification != 1.0:
-                amp = modulation.odd_amplification
+            amp = self._modulation_amplification(student, modulation)
             if modulation.global_anxiety != 0:
                 student.emotions.anxiety = max(0.0, min(1.0,
                     student.emotions.anxiety + modulation.global_anxiety * amp))
@@ -725,22 +783,57 @@ class ClassroomV2:
     def step(
         self, teacher_action: TeacherAction
     ) -> tuple[ClassroomObservation, float, bool, dict[str, Any]]:
-        """Advance one turn (= one class period)."""
+        """Advance one turn (= one class period).
+
+        Situational modulation (exam, diurnal, peer conflict, ...) is applied
+        as a TRANSIENT effect: we snapshot the affected student fields,
+        apply the modulation, run the cognitive cycle, then restore the
+        original baseline values. This prevents per-turn offsets from
+        accumulating as drift over 950 turns.
+
+        The baseline student state is driven only by:
+          - student.step() cognitive dynamics
+          - teacher action effects (_apply_teacher_action)
+          - archetype modifiers (applied at reset)
+        Situational modulation is strictly environmental context.
+        """
         self.turn += 1
         self._advance_time()
 
-        # Phase 0: Apply situational modulation (exam stress, diurnal, events)
+        # Phase 0: Compute situational modulation for this turn (transient)
         modulator = self._get_situational_modulator()
+        modulation = None
+        baseline_snaps: list[dict] = []
+        modulated_snaps: list[dict] = []
         if modulator is not None:
             modulation = modulator.compute_modulation(turn=self.turn, period=self.period)
-            self._apply_situational_modulation(modulation)
             self._last_modulation = modulation
+
+            # Snapshot BEFORE applying modulation (true baseline)
+            baseline_snaps = [
+                self._snapshot_student_for_modulation(s) for s in self.students
+            ]
+            # Apply modulation (in-place; will be stripped after cognitive step)
+            self._apply_situational_modulation(modulation)
+            # Snapshot AFTER applying modulation (baseline + M, clamped)
+            modulated_snaps = [
+                self._snapshot_student_for_modulation(s) for s in self.students
+            ]
 
         context = self._make_context(teacher_action)
 
-        # Phase 1: Each student runs cognitive cycle
+        # Phase 1: Each student runs cognitive cycle (with modulated state)
         for student in self.students:
             student.step(context, self._rng)
+
+        # Phase 1b: Strip transient modulation, preserving cognitive delta
+        # Final state = baseline + (post_step - modulated)
+        # = baseline + cognitive_delta (no persistent situational offset)
+        if modulation is not None:
+            for student, baseline, modulated in zip(
+                self.students, baseline_snaps, modulated_snaps
+            ):
+                self._reapply_transient_modulation(student, baseline, modulated)
 
         # Phase 2: Student interactions
         interactions = self.interaction_engine.process_turn(
@@ -830,10 +923,23 @@ class ClassroomV2:
     # ------------------------------------------------------------------
 
     def _generate_students(self) -> list[CognitiveStudent]:
-        """Generate students with realistic Korean prevalence distribution."""
+        """Generate students respecting Korean epidemiology + comorbidity rates.
+
+        Generation logic is split into four explicit stages:
+          1. ADHD subtype allocation (JKMS 2017 distribution)
+          2. ADHD comorbidity branching (MTA 1999 rates)
+          3. Non-ADHD confounders (anxiety, odd, gifted, sleep_deprived)
+          4. Differential-diagnosis distractors (asd, depression, LD — rare)
+
+        All new profiles from PROFILE_DELTAS are reachable through this path.
+        Allocation ratios are conservative — capped to preserve aggregate
+        ADHD prevalence and non-ADHD confounder rates from §25.13 targets.
+        """
         students: list[CognitiveStudent] = []
 
-        # ADHD count (archetype may modify prevalence)
+        # ------------------------------------------------------------------
+        # Stage 1: ADHD total count (archetype may modify prevalence)
+        # ------------------------------------------------------------------
         if isinstance(self.adhd_prevalence, tuple):
             rate = self._rng.uniform(*self.adhd_prevalence)
         else:
@@ -842,38 +948,120 @@ class ClassroomV2:
             rate = max(0.0, rate + self.archetype.adhd_prevalence_modifier)
         n_adhd = max(0, round(self.n_students * rate))
 
-        # Confounding profile counts (Korean comorbidity data PMC5290097)
+        # Subtype split: combined 24%, HI 24%, inattentive 52% (JKMS 2017)
+        n_combined = round(n_adhd * 0.24)
+        n_hi = round(n_adhd * 0.24)
+        n_inattentive = n_adhd - n_combined - n_hi
+
+        # ------------------------------------------------------------------
+        # Stage 2: ADHD comorbidity branching
+        # Per MTA 1999 / Jensen 2001: ADHD students often present with
+        # a comorbid profile. We re-label SOME ADHD students as comorbid
+        # variants rather than pure subtype. This keeps total ADHD count
+        # fixed (all comorbid profiles are still ADHD positives).
+        # ------------------------------------------------------------------
+        adhd_profiles: list[str] = (
+            ["adhd_combined"] * n_combined
+            + ["adhd_hyperactive_impulsive"] * n_hi
+            + ["adhd_inattentive"] * n_inattentive
+        )
+
+        # Comorbidity branching probabilities per ADHD student:
+        #   ODD overlay ~40% (MTA 1999)
+        #   Anxiety overlay ~28% (MTA 1999)
+        #   Depression overlay ~12% (Jensen 2001)
+        #   LD overlay ~30% (DuPaul 2013)
+        # Probabilities are applied independently, but we pick a single
+        # best-fit comorbid variant per student to avoid double labeling.
+        p_odd = 0.40
+        p_anx = 0.28
+        p_dep = 0.12
+        p_ld = 0.30
+
+        branched: list[str] = []
+        for base in adhd_profiles:
+            roll = self._rng.random()
+            # Apply comorbidity in priority order (most disruptive first).
+            # Each ADHD student gets at most one comorbid relabel.
+            if base == "adhd_combined" and roll < p_odd:
+                branched.append("adhd_c_plus_odd")
+            elif base == "adhd_hyperactive_impulsive" and roll < p_odd:
+                branched.append("adhd_h_plus_odd")
+            elif base == "adhd_inattentive" and roll < p_anx:
+                branched.append("adhd_i_plus_anxiety")
+            elif base == "adhd_inattentive" and roll < p_anx + p_ld:
+                branched.append("adhd_i_plus_ld")
+            elif roll < p_odd + p_dep:
+                # Depression overlay applies to any ADHD subtype
+                branched.append("adhd_plus_depression")
+            else:
+                branched.append(base)
+        adhd_profiles = branched
+
+        # ------------------------------------------------------------------
+        # Stage 3: Non-ADHD confounders (Korean community data)
+        # ------------------------------------------------------------------
         n_anxiety = round(self.n_students * self._rng.uniform(0.05, 0.08))
         n_odd = round(self.n_students * self._rng.uniform(0.03, 0.05))
         n_gifted = round(self.n_students * self._rng.uniform(0.03, 0.05))
         n_sleep = round(self.n_students * self._rng.uniform(0.05, 0.10))
 
-        # Cap total special profiles to avoid exceeding n_students
-        n_special = n_adhd + n_anxiety + n_odd + n_gifted + n_sleep
+        # Some anxiety students have comorbid depression (internalizing distractor)
+        n_anx_dep = round(n_anxiety * self._rng.uniform(0.15, 0.25))
+        n_anxiety_only = max(0, n_anxiety - n_anx_dep)
+
+        # ------------------------------------------------------------------
+        # Stage 4: Differential diagnosis distractors (rare, each 1-3%)
+        # These are non-ADHD students whose behavior may be confused with ADHD.
+        # ------------------------------------------------------------------
+        # ASD-like: ~1-2% (Korean prevalence estimate)
+        n_asd = round(self.n_students * self._rng.uniform(0.01, 0.02))
+        # Pure depression (no anxiety): ~1% child-onset
+        n_dep = round(self.n_students * self._rng.uniform(0.005, 0.015))
+        # Pure LD (no ADHD): ~2-3%
+        n_ld = round(self.n_students * self._rng.uniform(0.02, 0.03))
+
+        # ------------------------------------------------------------------
+        # Cap total and fill remaining with normal variants
+        # ------------------------------------------------------------------
+        n_special = (
+            n_adhd + n_anxiety + n_odd + n_gifted + n_sleep
+            + n_asd + n_dep + n_ld
+        )
         if n_special > self.n_students:
-            scale = (self.n_students * 0.5) / n_special
-            n_anxiety = round(n_anxiety * scale)
+            # Scale down non-ADHD categories (preserve ADHD rate)
+            scale = (self.n_students - n_adhd) / max(1, n_special - n_adhd)
+            scale = max(0.0, min(1.0, scale * 0.9))  # small safety margin
+            n_anxiety_only = round(n_anxiety_only * scale)
+            n_anx_dep = round(n_anx_dep * scale)
+            n_anxiety = n_anxiety_only + n_anx_dep
             n_odd = round(n_odd * scale)
             n_gifted = round(n_gifted * scale)
             n_sleep = round(n_sleep * scale)
+            n_asd = round(n_asd * scale)
+            n_dep = round(n_dep * scale)
+            n_ld = round(n_ld * scale)
 
-        n_normal = self.n_students - n_adhd - n_anxiety - n_odd - n_gifted - n_sleep
+        n_normal = self.n_students - (
+            n_adhd + n_anxiety + n_odd + n_gifted + n_sleep
+            + n_asd + n_dep + n_ld
+        )
         if n_normal < 0:
             n_normal = 0
 
-        # Build ADHD subtype split: combined 24%, HI 24%, inattentive 52%
-        n_combined = round(n_adhd * 0.24)
-        n_hi = round(n_adhd * 0.24)
-        n_inattentive = n_adhd - n_combined - n_hi
-
+        # ------------------------------------------------------------------
+        # Assemble final profile list
+        # ------------------------------------------------------------------
         profiles: list[str] = (
-            ["adhd_combined"] * n_combined
-            + ["adhd_hyperactive_impulsive"] * n_hi
-            + ["adhd_inattentive"] * n_inattentive
-            + ["anxiety"] * n_anxiety
+            adhd_profiles
+            + ["anxiety"] * n_anxiety_only
+            + ["anxiety_plus_depression"] * n_anx_dep
             + ["odd"] * n_odd
             + ["gifted"] * n_gifted
             + ["sleep_deprived"] * n_sleep
+            + ["asd_like"] * n_asd
+            + ["depression"] * n_dep
+            + ["learning_disorder"] * n_ld
             + ["normal_active"] * round(n_normal * 0.4)
             + ["normal_quiet"] * (n_normal - round(n_normal * 0.4))
         )
