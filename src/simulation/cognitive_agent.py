@@ -80,71 +80,6 @@ class CognitiveParameters:
 
 
 # ---------------------------------------------------------------------------
-# Cognitive Presets (one per student type)
-# ---------------------------------------------------------------------------
-
-COGNITIVE_PRESETS: dict[str, CognitiveParameters] = {
-    # Typical quiet student: high plan consistency, low impulsivity
-    "normal_quiet": CognitiveParameters(
-        att_bandwidth=3, vision_r=4, retention=5, recency_decay=0.99,
-        importance_trigger=150.0, plan_consistency=0.90, impulse_override=0.05,
-        task_initiation_delay=0.0, social_sensitivity=0.3, conflict_tendency=0.05,
-    ),
-    # Typical active student: slightly more distractible, more social
-    "normal_active": CognitiveParameters(
-        att_bandwidth=3, vision_r=5, retention=5, recency_decay=0.98,
-        importance_trigger=120.0, plan_consistency=0.80, impulse_override=0.10,
-        task_initiation_delay=0.0, social_sensitivity=0.6, conflict_tendency=0.10,
-    ),
-    # ADHD predominantly inattentive: narrow bandwidth, fast decay, high initiation delay
-    # DSM-5 314.00; Korean prevalence 5.0% (KCI ART001701933)
-    "adhd_inattentive": CognitiveParameters(
-        att_bandwidth=1, vision_r=3, retention=2, recency_decay=0.95,
-        importance_trigger=50.0, plan_consistency=0.50, impulse_override=0.15,
-        task_initiation_delay=0.4, social_sensitivity=0.4, conflict_tendency=0.08,
-    ),
-    # ADHD predominantly hyperactive-impulsive: wide scan, high impulse override
-    # DSM-5 314.01; Korean prevalence 2.3% (KCI ART001701933)
-    "adhd_hyperactive_impulsive": CognitiveParameters(
-        att_bandwidth=2, vision_r=6, retention=3, recency_decay=0.96,
-        importance_trigger=40.0, plan_consistency=0.40, impulse_override=0.40,
-        task_initiation_delay=0.1, social_sensitivity=0.7, conflict_tendency=0.25,
-    ),
-    # ADHD combined type: worst of both worlds
-    # DSM-5 314.01; Korean prevalence 2.3% (KCI ART001701933)
-    "adhd_combined": CognitiveParameters(
-        att_bandwidth=1, vision_r=6, retention=2, recency_decay=0.94,
-        importance_trigger=35.0, plan_consistency=0.35, impulse_override=0.35,
-        task_initiation_delay=0.3, social_sensitivity=0.6, conflict_tendency=0.20,
-    ),
-    # Generalized anxiety: narrow focus, high social sensitivity, low conflict
-    "anxiety": CognitiveParameters(
-        att_bandwidth=2, vision_r=3, retention=4, recency_decay=0.98,
-        importance_trigger=50.0, plan_consistency=0.75, impulse_override=0.10,
-        task_initiation_delay=0.2, social_sensitivity=0.8, conflict_tendency=0.03,
-    ),
-    # Oppositional Defiant Disorder: high conflict, low plan following
-    "odd": CognitiveParameters(
-        att_bandwidth=2, vision_r=4, retention=4, recency_decay=0.97,
-        importance_trigger=80.0, plan_consistency=0.40, impulse_override=0.35,
-        task_initiation_delay=0.1, social_sensitivity=0.5, conflict_tendency=0.40,
-    ),
-    # Gifted: high bandwidth, high retention, moderate impulse (boredom-driven)
-    "gifted": CognitiveParameters(
-        att_bandwidth=4, vision_r=5, retention=6, recency_decay=0.99,
-        importance_trigger=200.0, plan_consistency=0.85, impulse_override=0.15,
-        task_initiation_delay=0.0, social_sensitivity=0.4, conflict_tendency=0.08,
-    ),
-    # Sleep-deprived: reduced everything, sluggish initiation
-    "sleep_deprived": CognitiveParameters(
-        att_bandwidth=2, vision_r=3, retention=3, recency_decay=0.96,
-        importance_trigger=100.0, plan_consistency=0.60, impulse_override=0.15,
-        task_initiation_delay=0.3, social_sensitivity=0.3, conflict_tendency=0.12,
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
 # Emotional State
 # ---------------------------------------------------------------------------
 
@@ -167,53 +102,441 @@ class EmotionalState:
     self_esteem: float = 0.65
 
 
-# Emotional presets derived from K-CBCL cluster profiles (KCI ART002650863).
-# Each maps to an EmotionalState constructor kwargs dict.
-EMOTIONAL_PRESETS: dict[str, dict[str, float]] = {
-    "normal_quiet": dict(
-        frustration=0.10, shame=0.08, anxiety=0.12, anger=0.05,
-        loneliness=0.08, excitement=0.15, trust_in_teacher=0.70, self_esteem=0.72,
-    ),
-    "normal_active": dict(
-        frustration=0.12, shame=0.08, anxiety=0.10, anger=0.10,
-        loneliness=0.06, excitement=0.30, trust_in_teacher=0.65, self_esteem=0.70,
-    ),
-    # ADHD-inattentive: higher shame/frustration from repeated academic failure
-    "adhd_inattentive": dict(
-        frustration=0.30, shame=0.25, anxiety=0.25, anger=0.10,
-        loneliness=0.20, excitement=0.10, trust_in_teacher=0.50, self_esteem=0.45,
-    ),
-    # ADHD-hyperactive: high excitement, low frustration tolerance, moderate anger
-    "adhd_hyperactive_impulsive": dict(
-        frustration=0.25, shame=0.15, anxiety=0.15, anger=0.25,
-        loneliness=0.12, excitement=0.40, trust_in_teacher=0.45, self_esteem=0.50,
-    ),
-    # ADHD-combined: worst emotional profile across multiple dimensions
-    "adhd_combined": dict(
-        frustration=0.35, shame=0.25, anxiety=0.20, anger=0.25,
-        loneliness=0.18, excitement=0.35, trust_in_teacher=0.40, self_esteem=0.40,
-    ),
-    # Anxiety: high anxiety/shame, low anger, high trust-seeking
-    "anxiety": dict(
-        frustration=0.15, shame=0.30, anxiety=0.45, anger=0.05,
-        loneliness=0.25, excitement=0.08, trust_in_teacher=0.55, self_esteem=0.35,
-    ),
-    # ODD: high anger/frustration, low trust, low shame
-    "odd": dict(
-        frustration=0.40, shame=0.08, anxiety=0.12, anger=0.45,
-        loneliness=0.15, excitement=0.20, trust_in_teacher=0.25, self_esteem=0.55,
-    ),
-    # Gifted: moderate frustration (boredom), high self-esteem
-    "gifted": dict(
-        frustration=0.20, shame=0.05, anxiety=0.10, anger=0.08,
-        loneliness=0.12, excitement=0.25, trust_in_teacher=0.65, self_esteem=0.80,
-    ),
-    # Sleep-deprived: flat affect, low excitement, moderate frustration
-    "sleep_deprived": dict(
-        frustration=0.25, shame=0.12, anxiety=0.18, anger=0.15,
-        loneliness=0.15, excitement=0.08, trust_in_teacher=0.55, self_esteem=0.55,
-    ),
+# ---------------------------------------------------------------------------
+# Dimensional Parameter Model (RDoC framework)
+# ---------------------------------------------------------------------------
+#
+# Instead of defining every profile as an absolute preset, we define ONE
+# normative baseline and express all profiles (ADHD, ODD, anxiety, etc.) as
+# deltas from that baseline. This matches:
+#
+#   - Research Domain Criteria (Insel et al., 2010; Cuthbert & Insel, 2013)
+#   - Dimensional psychopathology (Haslam et al., 2006; Marcus & Barry, 2011)
+#   - Computational psychiatry parameter-shift models (Huys et al., 2016)
+#
+# Each delta entry is a float offset added to the corresponding baseline
+# field. Observable-state deltas fix the bug where every profile started
+# with identical first-turn observable values.
+#
+# Initial values are hand-seeded from the literature and serve as the
+# starting point for autoresearch calibration (see docs/정리.md §25).
+# ---------------------------------------------------------------------------
+
+# Normative baseline — "population mean" normal child cognitive parameters
+BASE_COGNITIVE = CognitiveParameters(
+    att_bandwidth=3,
+    vision_r=4,
+    retention=5,
+    recency_decay=0.985,
+    importance_trigger=135.0,
+    plan_consistency=0.85,
+    impulse_override=0.075,
+    task_initiation_delay=0.0,
+    social_sensitivity=0.45,
+    conflict_tendency=0.075,
+)
+
+# Normative baseline — emotional state
+BASE_EMOTIONAL: dict[str, float] = dict(
+    frustration=0.11,
+    shame=0.08,
+    anxiety=0.11,
+    anger=0.075,
+    loneliness=0.07,
+    excitement=0.225,
+    trust_in_teacher=0.675,
+    self_esteem=0.71,
+)
+
+# Normative baseline — observable state (what teacher can see)
+# NOTE: previously hardcoded identically across all profiles — now per-profile
+BASE_OBSERVABLE: dict[str, float] = dict(
+    distress_level=0.15,
+    compliance=0.72,
+    attention=0.65,
+    escalation_risk=0.08,
+)
+
+
+# ---------------------------------------------------------------------------
+# Profile Deltas — each profile = BASE + delta on named fields only
+# ---------------------------------------------------------------------------
+#
+# Delta structure:
+#   {
+#     "cognitive":  {field: offset, ...}   # added to BASE_COGNITIVE
+#     "emotional":  {field: offset, ...}   # added to BASE_EMOTIONAL
+#     "observable": {field: offset, ...}   # added to BASE_OBSERVABLE
+#     "_sources":   "citation string"      # provenance for each delta
+#   }
+#
+# Ranges are documented alongside each delta for autoresearch calibration
+# (see .harness/objective_v2.yaml — to be created).
+# ---------------------------------------------------------------------------
+
+PROFILE_DELTAS: dict[str, dict] = {
+    # ── Normal variants (small delta from baseline) ────────────────────────
+    "normal_quiet": {
+        "cognitive": {
+            "plan_consistency": +0.05, "impulse_override": -0.025,
+            "social_sensitivity": -0.15, "recency_decay": +0.005,
+            "importance_trigger": +15.0, "conflict_tendency": -0.025,
+        },
+        "emotional": {
+            "frustration": -0.01, "excitement": -0.075, "self_esteem": +0.01,
+            "trust_in_teacher": +0.025, "anger": -0.025,
+        },
+        "observable": {},
+        "_sources": "Within 1 SD of normative baseline",
+    },
+    "normal_active": {
+        "cognitive": {
+            "vision_r": +1, "recency_decay": -0.005,
+            "importance_trigger": -15.0, "plan_consistency": -0.05,
+            "impulse_override": +0.025, "social_sensitivity": +0.15,
+            "conflict_tendency": +0.025,
+        },
+        "emotional": {
+            "frustration": +0.01, "loneliness": -0.01, "excitement": +0.075,
+            "trust_in_teacher": -0.025, "anger": +0.025,
+        },
+        "observable": {
+            "compliance": -0.02, "escalation_risk": +0.02,
+        },
+        "_sources": "Within 1 SD of normative baseline; social/active variant",
+    },
+
+    # ── ADHD subtypes (DSM-5; Korean prevalence KCI ART001701933) ──────────
+    "adhd_inattentive": {
+        "cognitive": {
+            "att_bandwidth": -2,              # DSM-5 A1: sustained attention
+            "vision_r": -1,                    # Narrow functional scan
+            "retention": -3,                   # Working memory (Barkley 1997)
+            "recency_decay": -0.035,           # Faster memory decay
+            "importance_trigger": -85.0,       # Lower reflection threshold
+            "plan_consistency": -0.35,         # Executive dysfunction
+            "impulse_override": +0.075,        # Mild impulsivity
+            "task_initiation_delay": +0.40,    # Task initiation deficit
+            "social_sensitivity": -0.05,
+        },
+        "emotional": {
+            "frustration": +0.19,              # Academic failure cumulation
+            "shame": +0.17,                    # K-CBCL internalizing
+            "anxiety": +0.14,
+            "loneliness": +0.13,
+            "excitement": -0.125,              # Blunted positive affect
+            "trust_in_teacher": -0.175,
+            "self_esteem": -0.26,              # Korean studies consistent
+        },
+        "observable": {
+            "attention": -0.25,                # Visible inattention
+            "compliance": -0.12,
+            "distress_level": +0.05,
+        },
+        "_sources": "DSM-5 314.00; Barkley 1997; KCI ART002794420, ART001701933",
+    },
+    "adhd_hyperactive_impulsive": {
+        "cognitive": {
+            "att_bandwidth": -1,
+            "vision_r": +2,                    # Hyper-distractible scan
+            "retention": -2,
+            "recency_decay": -0.025,
+            "importance_trigger": -95.0,
+            "plan_consistency": -0.45,
+            "impulse_override": +0.325,        # Core hyperactivity-impulsivity
+            "task_initiation_delay": +0.10,
+            "social_sensitivity": +0.25,
+            "conflict_tendency": +0.175,
+        },
+        "emotional": {
+            "frustration": +0.14,
+            "shame": +0.07,
+            "anxiety": +0.04,
+            "anger": +0.175,                   # Emotional dysregulation
+            "loneliness": +0.05,
+            "excitement": +0.175,
+            "trust_in_teacher": -0.225,
+            "self_esteem": -0.21,
+        },
+        "observable": {
+            "attention": -0.15,
+            "compliance": -0.17,
+            "escalation_risk": +0.17,          # Visible disruption
+            "distress_level": +0.03,
+        },
+        "_sources": "DSM-5 314.01; Sonuga-Barke 2003 dual pathway; KCI ART002794420",
+    },
+    "adhd_combined": {
+        # Combined = additive(inattentive, hyperactive) + interaction term
+        # Interaction term captures non-linear comorbidity effects
+        "_base": ["adhd_inattentive", "adhd_hyperactive_impulsive"],
+        "cognitive": {
+            # Additional shifts on top of additive base
+            "plan_consistency": +0.05,         # Slight offset vs pure sum
+            "att_bandwidth": +1,               # Cap at -2 total
+        },
+        "emotional": {
+            "frustration": -0.04,              # Slight dampening
+            "anger": -0.05,
+            "self_esteem": +0.01,
+        },
+        "observable": {
+            "distress_level": +0.02,
+        },
+        "_sources": "DSM-5 314.01 combined; MTA Cooperative Group 1999",
+    },
+
+    # ── Anxiety disorders ──────────────────────────────────────────────────
+    "anxiety": {
+        "cognitive": {
+            "att_bandwidth": -1,               # Narrow hypervigilance
+            "vision_r": -1,
+            "retention": -1,
+            "recency_decay": -0.005,
+            "importance_trigger": -85.0,       # Hyper-reactive reflection
+            "plan_consistency": -0.10,
+            "impulse_override": +0.025,
+            "task_initiation_delay": +0.20,    # Avoidance delay
+            "social_sensitivity": +0.35,
+            "conflict_tendency": -0.045,
+        },
+        "emotional": {
+            "frustration": +0.04,
+            "shame": +0.22,
+            "anxiety": +0.34,                  # Core symptom
+            "anger": -0.025,
+            "loneliness": +0.18,
+            "excitement": -0.145,
+            "trust_in_teacher": -0.125,
+            "self_esteem": -0.36,
+        },
+        "observable": {
+            "distress_level": +0.15,
+            "attention": -0.08,
+            "compliance": +0.03,               # Compliant but anxious
+        },
+        "_sources": "DSM-5 300.02 GAD; K-CBCL internalizing cluster (ART002650863)",
+    },
+
+    # ── Oppositional Defiant Disorder ──────────────────────────────────────
+    "odd": {
+        "cognitive": {
+            "att_bandwidth": -1,
+            "recency_decay": -0.015,
+            "importance_trigger": -55.0,
+            "plan_consistency": -0.45,         # Refuses to follow
+            "impulse_override": +0.275,
+            "task_initiation_delay": +0.10,
+            "social_sensitivity": +0.05,
+            "conflict_tendency": +0.325,       # Core: peer/authority conflict
+        },
+        "emotional": {
+            "frustration": +0.29,
+            "shame": 0.00,                     # Externalizing — low shame
+            "anxiety": +0.01,
+            "anger": +0.375,                   # Core
+            "loneliness": +0.08,
+            "trust_in_teacher": -0.425,        # Authority mistrust
+            "self_esteem": -0.16,
+        },
+        "observable": {
+            "compliance": -0.32,
+            "escalation_risk": +0.27,
+            "distress_level": +0.04,
+        },
+        "_sources": "DSM-5 313.81; Burke et al. 2002 on ODD-ADHD comorbidity",
+    },
+
+    # ── Gifted ─────────────────────────────────────────────────────────────
+    "gifted": {
+        "cognitive": {
+            "att_bandwidth": +1,
+            "vision_r": +1,
+            "retention": +1,
+            "recency_decay": +0.005,
+            "importance_trigger": +65.0,
+            "plan_consistency": 0.00,
+            "impulse_override": +0.075,        # Boredom-driven
+            "social_sensitivity": -0.05,
+        },
+        "emotional": {
+            "frustration": +0.09,              # Boredom frustration
+            "shame": -0.03,
+            "anxiety": -0.01,
+            "excitement": +0.025,
+            "self_esteem": +0.09,
+        },
+        "observable": {
+            "attention": +0.05,
+            "compliance": +0.02,
+        },
+        "_sources": "Korean gifted education research; boredom-driven fidgeting pattern",
+    },
+
+    # ── Sleep-deprived (state, not trait) ──────────────────────────────────
+    "sleep_deprived": {
+        "cognitive": {
+            "att_bandwidth": -1,
+            "vision_r": -1,
+            "retention": -2,
+            "recency_decay": -0.025,
+            "importance_trigger": -35.0,
+            "plan_consistency": -0.25,
+            "impulse_override": +0.075,
+            "task_initiation_delay": +0.30,
+            "social_sensitivity": -0.15,
+            "conflict_tendency": +0.045,
+        },
+        "emotional": {
+            "frustration": +0.14,
+            "shame": +0.04,
+            "anxiety": +0.07,
+            "anger": +0.075,
+            "loneliness": +0.08,
+            "excitement": -0.145,              # Flat affect
+            "trust_in_teacher": -0.125,
+            "self_esteem": -0.16,
+        },
+        "observable": {
+            "attention": -0.18,
+            "compliance": -0.05,
+            "distress_level": +0.04,
+        },
+        "_sources": "Sleep deprivation → inattentive-like presentation (literature review)",
+    },
+
+    # ── Comorbidity profiles (dimensional overlap) ─────────────────────────
+    # Epidemiology: ADHD+ODD ≈ 35-45%, ADHD+anxiety ≈ 25-30%
+    # (MTA Cooperative Group 1999; Jensen et al. 2001; Korean KCMHS)
+    "adhd_i_plus_anxiety": {
+        "_base": ["adhd_inattentive", "anxiety"],
+        "cognitive": {
+            "plan_consistency": +0.05,         # Mild offset vs pure sum
+            "social_sensitivity": -0.10,
+        },
+        "emotional": {
+            "shame": +0.05,                    # Synergistic internalizing
+            "frustration": -0.03,
+            "anxiety": -0.02,
+        },
+        "observable": {
+            "distress_level": +0.03,
+        },
+        "_sources": "MTA 1999 ADHD-anxiety comorbid pattern; Jensen et al. 2001",
+    },
+    "adhd_h_plus_odd": {
+        "_base": ["adhd_hyperactive_impulsive", "odd"],
+        "cognitive": {
+            "impulse_override": -0.05,         # Cap to avoid runaway
+            "conflict_tendency": +0.05,        # Slight synergy
+        },
+        "emotional": {
+            "anger": +0.04,                    # Amplified externalizing
+            "frustration": -0.03,
+        },
+        "observable": {
+            "escalation_risk": +0.03,
+        },
+        "_sources": "Burke et al. 2002; MTA 1999; common clinical presentation",
+    },
 }
+
+
+def _combine_deltas(name: str, visited: set[str] | None = None) -> dict:
+    """Recursively combine profile deltas, expanding `_base` composition.
+
+    Returns a dict with keys {cognitive, emotional, observable} — each
+    containing summed offsets across all base profiles and the local delta.
+    """
+    if visited is None:
+        visited = set()
+    if name in visited:
+        raise ValueError(f"Circular profile delta reference: {name}")
+    visited.add(name)
+
+    spec = PROFILE_DELTAS.get(name, {})
+    combined: dict[str, dict[str, float]] = {
+        "cognitive": {}, "emotional": {}, "observable": {},
+    }
+
+    # Expand base profiles first (additive composition)
+    for base_name in spec.get("_base", []):
+        base_combined = _combine_deltas(base_name, visited.copy())
+        for section in ("cognitive", "emotional", "observable"):
+            for k, v in base_combined[section].items():
+                combined[section][k] = combined[section].get(k, 0.0) + v
+
+    # Apply local delta on top
+    for section in ("cognitive", "emotional", "observable"):
+        for k, v in spec.get(section, {}).items():
+            combined[section][k] = combined[section].get(k, 0.0) + v
+
+    return combined
+
+
+def _apply_delta_to_cognitive(delta: dict[str, float]) -> CognitiveParameters:
+    """Return a new CognitiveParameters = BASE_COGNITIVE + delta."""
+    params = copy(BASE_COGNITIVE)
+    for field_name, offset in delta.items():
+        if hasattr(params, field_name):
+            current = getattr(params, field_name)
+            new_val = current + offset
+            # Clamp integer fields
+            if field_name in {"att_bandwidth", "vision_r", "retention"}:
+                new_val = max(1, int(round(new_val)))
+            # Clamp probability/float fields to [0, 1] (or reasonable range)
+            elif field_name in {
+                "plan_consistency", "impulse_override",
+                "task_initiation_delay", "social_sensitivity", "conflict_tendency",
+            }:
+                new_val = max(0.0, min(1.0, float(new_val)))
+            elif field_name == "recency_decay":
+                new_val = max(0.80, min(1.0, float(new_val)))
+            elif field_name == "importance_trigger":
+                new_val = max(10.0, float(new_val))
+            setattr(params, field_name, new_val)
+    return params
+
+
+def _apply_delta_to_dict(base: dict[str, float], delta: dict[str, float]) -> dict[str, float]:
+    """Return base + delta, clamping each value to [0, 1]."""
+    out = dict(base)
+    for k, v in delta.items():
+        out[k] = max(0.0, min(1.0, out.get(k, 0.0) + v))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Derived presets (for backward compatibility — generated from deltas)
+# ---------------------------------------------------------------------------
+
+def _build_cognitive_presets() -> dict[str, CognitiveParameters]:
+    out: dict[str, CognitiveParameters] = {}
+    for name in PROFILE_DELTAS:
+        combined = _combine_deltas(name)
+        out[name] = _apply_delta_to_cognitive(combined["cognitive"])
+    return out
+
+
+def _build_emotional_presets() -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    for name in PROFILE_DELTAS:
+        combined = _combine_deltas(name)
+        out[name] = _apply_delta_to_dict(BASE_EMOTIONAL, combined["emotional"])
+    return out
+
+
+def _build_observable_presets() -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    for name in PROFILE_DELTAS:
+        combined = _combine_deltas(name)
+        out[name] = _apply_delta_to_dict(BASE_OBSERVABLE, combined["observable"])
+    return out
+
+
+COGNITIVE_PRESETS: dict[str, CognitiveParameters] = _build_cognitive_presets()
+EMOTIONAL_PRESETS: dict[str, dict[str, float]] = _build_emotional_presets()
+OBSERVABLE_PRESETS: dict[str, dict[str, float]] = _build_observable_presets()
 
 
 # ---------------------------------------------------------------------------
@@ -532,13 +855,12 @@ class CognitiveStudent:
             recency_decay=self.base_params.recency_decay,
         )
 
-        # Observable state (what teacher can see)
-        self.state: dict[str, float] = {
-            "distress_level": 0.2,
-            "compliance": 0.7,
-            "attention": 0.6,
-            "escalation_risk": 0.1,
-        }
+        # Observable state (what teacher can see) — profile-specific initial
+        # values from dimensional delta model (fixes previous bug where all
+        # profiles started with identical observable state)
+        self.state: dict[str, float] = dict(
+            OBSERVABLE_PRESETS.get(profile_type, OBSERVABLE_PRESETS.get("normal_quiet", BASE_OBSERVABLE))
+        )
         self.exhibited_behaviors: list[str] = []
         self.current_action: str = "on_task"
         self.managed: bool = False
