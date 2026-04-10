@@ -439,6 +439,169 @@ PROFILE_DELTAS: dict[str, dict] = {
         },
         "_sources": "Burke et al. 2002; MTA 1999; common clinical presentation",
     },
+    # ADHD-combined + ODD — most disruptive, worst long-term prognosis
+    "adhd_c_plus_odd": {
+        "_base": ["adhd_combined", "odd"],
+        "cognitive": {
+            "impulse_override": -0.08,         # Cap, additive would overflow
+            "conflict_tendency": +0.08,
+            "plan_consistency": +0.05,         # Cap
+        },
+        "emotional": {
+            "anger": +0.05,
+            "frustration": -0.03,
+            "trust_in_teacher": +0.05,         # Slight offset (numeric cap)
+        },
+        "observable": {
+            "escalation_risk": +0.05,
+            "compliance": +0.05,               # Cap offset
+        },
+        "_sources": "MTA 1999; Burke 2002; worst clinical trajectory in ADHD+ODD",
+    },
+    # ADHD-I + learning disorder — chronic academic failure loop
+    "adhd_i_plus_ld": {
+        "_base": ["adhd_inattentive"],          # LD delta added below
+        "cognitive": {
+            "att_bandwidth": -1,                # Extra hit on working memory
+            "retention": -1,
+            "recency_decay": -0.01,
+            "importance_trigger": -15.0,
+            "task_initiation_delay": +0.10,
+        },
+        "emotional": {
+            "shame": +0.10,                     # Compounded academic failure
+            "frustration": +0.08,
+            "self_esteem": -0.12,
+            "loneliness": +0.05,
+        },
+        "observable": {
+            "attention": -0.05,
+            "compliance": -0.05,
+        },
+        "_sources": "DuPaul et al. 2013 J Learn Disabil; Larson 2011 Pediatrics 46% LD comorbid",
+    },
+    # ADHD + depression — task initiation collapse, highest risk
+    "adhd_plus_depression": {
+        "_base": ["adhd_inattentive"],          # Depression delta added
+        "cognitive": {
+            "task_initiation_delay": +0.20,     # Extreme delay
+            "plan_consistency": -0.10,
+            "importance_trigger": +20.0,        # Rumination
+        },
+        "emotional": {
+            "shame": +0.12,
+            "loneliness": +0.18,
+            "excitement": -0.10,                # Anhedonia
+            "self_esteem": -0.20,
+            "trust_in_teacher": -0.05,
+        },
+        "observable": {
+            "attention": -0.05,
+            "distress_level": +0.12,
+            "compliance": -0.05,
+        },
+        "_sources": "Jensen 2001 MTA; Daviss 2008 ADHD-depression review 6-38%",
+    },
+    # Anxiety + depression — internalizing distractor (confuses with ADHD-I)
+    "anxiety_plus_depression": {
+        "_base": ["anxiety"],
+        "cognitive": {
+            "task_initiation_delay": +0.15,
+            "importance_trigger": +10.0,
+            "plan_consistency": -0.05,
+        },
+        "emotional": {
+            "shame": +0.08,
+            "loneliness": +0.12,
+            "excitement": -0.08,                # Anhedonia
+            "self_esteem": -0.15,
+        },
+        "observable": {
+            "attention": -0.08,                 # Looks like inattentive
+            "distress_level": +0.10,
+        },
+        "_sources": "Kessler 2005 comorbidity survey; Caspi 2014 p-factor; distractor profile",
+    },
+
+    # ── Differential diagnosis distractors (non-ADHD but may look similar) ──
+    # ASD-like — social communication differences, routine rigidity
+    "asd_like": {
+        "_base": [],                             # Not ADHD base
+        "cognitive": {
+            "att_bandwidth": -1,                 # Atypical attention focus
+            "vision_r": -2,                      # Narrow but intense
+            "retention": +1,                     # Hyper-retention of details
+            "plan_consistency": +0.10,           # Routine preference
+            "impulse_override": -0.02,
+            "social_sensitivity": -0.30,         # Reduced social cue reading
+            "conflict_tendency": -0.02,
+        },
+        "emotional": {
+            "anxiety": +0.18,                    # Novelty anxiety
+            "loneliness": +0.15,
+            "excitement": -0.10,
+            "self_esteem": -0.10,
+            "trust_in_teacher": -0.08,
+        },
+        "observable": {
+            "distress_level": +0.08,
+            "compliance": +0.03,                 # Rule-following when understood
+        },
+        "_sources": "DSM-5 299.00; Lai et al. 2014; ADHD-ASD differential diagnosis",
+    },
+    # Pure depression (major distractor for ADHD-I)
+    "depression": {
+        "_base": [],
+        "cognitive": {
+            "att_bandwidth": -1,                 # Concentration difficulty
+            "retention": -1,
+            "recency_decay": -0.01,
+            "importance_trigger": +30.0,         # Rumination threshold
+            "plan_consistency": -0.15,
+            "task_initiation_delay": +0.35,      # Anhedonic delay
+            "social_sensitivity": -0.10,
+        },
+        "emotional": {
+            "frustration": +0.05,
+            "shame": +0.20,
+            "anxiety": +0.08,
+            "loneliness": +0.25,                 # Core
+            "excitement": -0.18,                 # Anhedonia core
+            "trust_in_teacher": -0.10,
+            "self_esteem": -0.30,                # Core
+        },
+        "observable": {
+            "attention": -0.10,
+            "compliance": -0.02,
+            "distress_level": +0.15,
+        },
+        "_sources": "DSM-5 296.2; Angold & Costello 1993; child depression literature",
+    },
+    # Learning disorder (isolated, no ADHD) — distractor
+    "learning_disorder": {
+        "_base": [],
+        "cognitive": {
+            "att_bandwidth": 0,                  # Attention OK
+            "retention": -2,                     # Core: working memory
+            "recency_decay": -0.015,
+            "importance_trigger": -10.0,
+            "plan_consistency": -0.05,
+            "task_initiation_delay": +0.15,      # Avoidance of difficult tasks
+        },
+        "emotional": {
+            "frustration": +0.15,                # Task failure
+            "shame": +0.18,
+            "anxiety": +0.10,
+            "loneliness": +0.08,
+            "self_esteem": -0.20,
+        },
+        "observable": {
+            "attention": -0.05,                  # Looks distracted when task too hard
+            "compliance": -0.05,
+            "distress_level": +0.08,
+        },
+        "_sources": "DSM-5 315.xx Specific Learning Disorder; DuPaul 2013",
+    },
 }
 
 
