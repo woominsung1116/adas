@@ -737,15 +737,78 @@ class ClassroomV2:
             new_val = max(0.0, min(1.0, baseline[field] + delta))
             setattr(student.emotions, field, new_val)
 
+    # Compositional profile → amplification channel membership.
+    # A profile "contains" a channel if its name matches one of these tokens
+    # OR (for ADHD) if `student.is_adhd` is True (which already covers all
+    # `adhd_*` profiles including comorbid variants like `adhd_i_plus_anxiety`).
+    #
+    # These sets are used by _modulation_amplification() to determine which
+    # amplification factors apply to compositional profiles.
+    _ANXIETY_CHANNEL_TOKENS: tuple[str, ...] = ("anxiety",)
+    _ODD_CHANNEL_TOKENS: tuple[str, ...] = ("odd",)
+
+    def _profile_contains_token(self, profile_type: str, tokens: tuple[str, ...]) -> bool:
+        """True if any token is a `_`-delimited component of the profile name.
+
+        Examples:
+            _profile_contains_token("anxiety_plus_depression", ("anxiety",)) → True
+            _profile_contains_token("adhd_i_plus_anxiety",     ("anxiety",)) → True
+            _profile_contains_token("adhd_h_plus_odd",         ("odd",))     → True
+            _profile_contains_token("sleep_deprived",          ("odd",))     → False
+        """
+        components = profile_type.split("_")
+        return any(tok in components for tok in tokens)
+
     def _modulation_amplification(self, student, modulation) -> float:
-        """Return profile-specific amplification coefficient for emotion shifts."""
+        """Compute the emotion-shift amplification for a (student, modulation).
+
+        Handles compositional profiles by membership inference:
+          - Any `adhd_*` profile (including comorbid variants like
+            `adhd_i_plus_anxiety`, `adhd_h_plus_odd`, `adhd_plus_depression`)
+            inherits the `adhd_amplification` channel because `is_adhd`
+            is True for all of them.
+          - Any profile whose name component-set contains "anxiety"
+            inherits the `anxiety_amplification` channel. This includes
+            `anxiety`, `anxiety_plus_depression`, and `adhd_i_plus_anxiety`.
+          - Any profile whose component-set contains "odd" inherits
+            the `odd_amplification` channel. This includes `odd`,
+            `adhd_h_plus_odd`, and `adhd_c_plus_odd`.
+
+        Combination rule: if multiple channels apply (e.g. an ADHD
+        student with anxiety), we take the **maximum** of the applicable
+        amplification factors. Maximum is chosen over multiplicative
+        combination for two reasons:
+          1. It bounds the amplification to each channel's documented
+             empirical range (Putwain 2008 for ADHD, Stein 1996 for
+             anxiety, Clifton 1987 for ODD), preventing runaway effects
+             when multiple channels simultaneously fire.
+          2. It gives a deterministic, auditable value consistent with
+             clinical reasoning that the dominant sensitivity drives
+             the response.
+
+        Returns 1.0 when no channel applies.
+        """
+        candidates: list[float] = []
+
+        # ADHD channel (covers all comorbid ADHD variants via is_adhd)
         if student.is_adhd and modulation.adhd_amplification != 1.0:
-            return modulation.adhd_amplification
-        if student.profile_type == "anxiety" and modulation.anxiety_amplification != 1.0:
-            return modulation.anxiety_amplification
-        if student.profile_type == "odd" and modulation.odd_amplification != 1.0:
-            return modulation.odd_amplification
-        return 1.0
+            candidates.append(modulation.adhd_amplification)
+
+        # Anxiety channel (component-level membership)
+        if modulation.anxiety_amplification != 1.0 and self._profile_contains_token(
+            student.profile_type, self._ANXIETY_CHANNEL_TOKENS
+        ):
+            candidates.append(modulation.anxiety_amplification)
+
+        # ODD channel
+        if modulation.odd_amplification != 1.0 and self._profile_contains_token(
+            student.profile_type, self._ODD_CHANNEL_TOKENS
+        ):
+            candidates.append(modulation.odd_amplification)
+
+        if not candidates:
+            return 1.0
+        return max(candidates)
 
     def _apply_situational_modulation(self, modulation) -> None:
         """Apply a ModulationVector in-place to student state/emotions.
@@ -954,11 +1017,24 @@ class ClassroomV2:
         n_inattentive = n_adhd - n_combined - n_hi
 
         # ------------------------------------------------------------------
-        # Stage 2: ADHD comorbidity branching
-        # Per MTA 1999 / Jensen 2001: ADHD students often present with
-        # a comorbid profile. We re-label SOME ADHD students as comorbid
-        # variants rather than pure subtype. This keeps total ADHD count
-        # fixed (all comorbid profiles are still ADHD positives).
+        # Stage 2: ADHD comorbidity branching (categorical sampling)
+        #
+        # Per MTA 1999 / Jensen 2001 / DuPaul 2013: ADHD students often
+        # present with a comorbid profile. Each ADHD student is sampled
+        # once from a subtype-specific categorical distribution whose
+        # outcomes are:
+        #   - the pure subtype (no comorbidity)
+        #   - subtype-appropriate comorbid variants
+        #   - generic `adhd_plus_depression` (cross-subtype)
+        #
+        # Invariant preserved: total ADHD count is unchanged. All comorbid
+        # branches still satisfy `profile_type.startswith("adhd_")`, so
+        # `is_adhd` remains True for the entire cohort.
+        #
+        # Using an explicit weights table makes the distribution auditable,
+        # normalized, and mutually exclusive (unlike the previous
+        # threshold-chain which made depression unreachable for some
+        # subtypes once earlier conditions had fired).
         # ------------------------------------------------------------------
         adhd_profiles: list[str] = (
             ["adhd_combined"] * n_combined
@@ -966,36 +1042,64 @@ class ClassroomV2:
             + ["adhd_inattentive"] * n_inattentive
         )
 
-        # Comorbidity branching probabilities per ADHD student:
-        #   ODD overlay ~40% (MTA 1999)
-        #   Anxiety overlay ~28% (MTA 1999)
-        #   Depression overlay ~12% (Jensen 2001)
-        #   LD overlay ~30% (DuPaul 2013)
-        # Probabilities are applied independently, but we pick a single
-        # best-fit comorbid variant per student to avoid double labeling.
-        p_odd = 0.40
-        p_anx = 0.28
-        p_dep = 0.12
-        p_ld = 0.30
+        # Subtype-specific categorical outcome tables.
+        # Rationale for weights (conservative, illustrative — not exact):
+        #   ADHD-C + ODD   ~35%  (MTA 1999 combined-subtype has highest ODD)
+        #   ADHD-H + ODD   ~30%  (MTA 1999)
+        #   ADHD-I + anxiety ~25% (internalizing skew in inattentive)
+        #   ADHD-I + LD    ~20%  (DuPaul 2013, academic failure loop)
+        #   ADHD + depression ~10% (Jensen 2001; cross-subtype)
+        # Remainder is pure subtype.
+        #
+        # Each table must sum to 1.0.
+        comorbidity_tables: dict[str, list[tuple[str, float]]] = {
+            "adhd_combined": [
+                ("adhd_c_plus_odd",      0.35),
+                ("adhd_plus_depression", 0.10),
+                ("adhd_combined",        0.55),  # pure
+            ],
+            "adhd_hyperactive_impulsive": [
+                ("adhd_h_plus_odd",      0.30),
+                ("adhd_plus_depression", 0.10),
+                ("adhd_hyperactive_impulsive", 0.60),  # pure
+            ],
+            "adhd_inattentive": [
+                ("adhd_i_plus_anxiety",  0.25),
+                ("adhd_i_plus_ld",       0.20),
+                ("adhd_plus_depression", 0.10),
+                ("adhd_inattentive",     0.45),  # pure
+            ],
+        }
+
+        def _sample_categorical(outcomes: list[tuple[str, float]]) -> str:
+            """Sample one outcome from a list of (name, weight) pairs.
+
+            Assumes weights sum to 1.0 (validated below). Uses the env RNG
+            for determinism with respect to the seed.
+            """
+            r = self._rng.random()
+            cumulative = 0.0
+            for name, w in outcomes:
+                cumulative += w
+                if r < cumulative:
+                    return name
+            # Numerical safety: return the last outcome if rounding escapes
+            return outcomes[-1][0]
+
+        # Validate tables sum to ~1.0 (catch future editing mistakes)
+        for base, table in comorbidity_tables.items():
+            total = sum(w for _, w in table)
+            assert abs(total - 1.0) < 1e-6, (
+                f"Comorbidity table for {base!r} sums to {total}, must be 1.0"
+            )
 
         branched: list[str] = []
         for base in adhd_profiles:
-            roll = self._rng.random()
-            # Apply comorbidity in priority order (most disruptive first).
-            # Each ADHD student gets at most one comorbid relabel.
-            if base == "adhd_combined" and roll < p_odd:
-                branched.append("adhd_c_plus_odd")
-            elif base == "adhd_hyperactive_impulsive" and roll < p_odd:
-                branched.append("adhd_h_plus_odd")
-            elif base == "adhd_inattentive" and roll < p_anx:
-                branched.append("adhd_i_plus_anxiety")
-            elif base == "adhd_inattentive" and roll < p_anx + p_ld:
-                branched.append("adhd_i_plus_ld")
-            elif roll < p_odd + p_dep:
-                # Depression overlay applies to any ADHD subtype
-                branched.append("adhd_plus_depression")
-            else:
+            table = comorbidity_tables.get(base)
+            if table is None:
                 branched.append(base)
+                continue
+            branched.append(_sample_categorical(table))
         adhd_profiles = branched
 
         # ------------------------------------------------------------------
