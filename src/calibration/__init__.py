@@ -1,11 +1,14 @@
-"""Calibration package — autoresearch loss functions and targets.
+"""Calibration package — autoresearch loss functions, metrics, and targets.
 
 Design (정리.md §25.13):
   - Tier 1: Naturalness patterns (60% weight)
   - Tier 2: Epidemiological anchors (40% weight)
   - Tier 3: Held-out validation (excluded from loss, used for post-hoc check)
 
-All losses return a single scalar. Autoresearch minimizes the combined loss.
+Layers:
+  - loss.py    : CalibrationTarget + combined loss functions
+  - metrics.py : metric extraction registry + CalibrationResultBundle
+  - loader.py  : YAML → runtime target objects
 """
 
 from .loss import (
@@ -19,7 +22,23 @@ from .loss import (
     compute_sparsity_penalty,
 )
 
+from .metrics import (
+    ClassHistory,
+    CalibrationResultBundle,
+    METRIC_REGISTRY,
+    resolve_metric,
+    supported_metrics,
+)
+
+from .loader import (
+    load_naturalness_targets,
+    load_epidemiology_targets,
+    load_targets,
+    default_harness_paths,
+)
+
 __all__ = [
+    # loss
     "LossResult",
     "CalibrationTarget",
     "NaturalnessTarget",
@@ -28,4 +47,15 @@ __all__ = [
     "compute_epidemiology_loss",
     "compute_combined_loss",
     "compute_sparsity_penalty",
+    # metrics
+    "ClassHistory",
+    "CalibrationResultBundle",
+    "METRIC_REGISTRY",
+    "resolve_metric",
+    "supported_metrics",
+    # loader
+    "load_naturalness_targets",
+    "load_epidemiology_targets",
+    "load_targets",
+    "default_harness_paths",
 ]
