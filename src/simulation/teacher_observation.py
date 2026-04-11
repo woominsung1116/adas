@@ -246,6 +246,78 @@ def observable_response_effect(
     return _OBSERVABLE_EFFECT_PERSISTENCE
 
 
+#: Canonical vocabulary for the behavior-derived class climate
+#: signal. Deliberately narrow — three labels, chosen so the
+#: existing ``TeacherEmotionalState.update_after_turn`` dispatch
+#: ("chaotic"/"tense" → stressed, "calm" → relaxed) still maps
+#: cleanly onto the new labels without changes to that method.
+CLASS_CLIMATE_LABELS: frozenset[str] = frozenset({
+    "calm",
+    "mixed",
+    "chaotic",
+})
+
+
+#: Explicit behavior-derived ladder thresholds. Documented in
+#: ``derive_class_climate``; exposed here for reuse in tests so
+#: the magic numbers live in one place.
+_CLASS_CLIMATE_CALM_MAX: float = 0.10
+_CLASS_CLIMATE_MIXED_MAX: float = 0.40
+
+
+def derive_class_climate(
+    observations: Iterable["StudentObservation"] | tuple["StudentObservation", ...],
+) -> str:
+    """Compute a teacher-facing class climate label from observables.
+
+    Phase 6 slice 7 replacement for the latent-derived
+    ``ClassroomObservation.class_mood`` field. Reads ONLY the
+    ``visible_behaviors`` + ``profile_hint`` fields of
+    ``StudentObservation`` (which are themselves already
+    scrubbed of latent-fallback sentinels and re-derived from
+    visible behavior by ``build_observations_from_classroom``).
+    No latent scalar is consulted.
+
+    Decision ladder:
+      fraction = (# students whose visible_behaviors contain any
+                  observable disruptive behavior) / max(1, n)
+      - fraction <= 0.10 → "calm"
+      - fraction <= 0.40 → "mixed"
+      - else             → "chaotic"
+
+    Rationale:
+      * Using a *fraction of disruptive students* (not a raw
+        count) makes the label invariant to class size so a
+        30-student class and a 5-student class map onto the
+        same thresholds.
+      * Thresholds are chosen so that a classroom with at most
+        1 out of 10 disruptive students reads "calm" and one
+        with 4+ reads "chaotic" — roughly matching the
+        qualitative shape the previous latent ``class_mood``
+        heuristic produced but using only teacher-visible signal.
+
+    Always returns a label in ``CLASS_CLIMATE_LABELS``.
+    """
+    obs_list = list(observations or ())
+    if not obs_list:
+        return "calm"
+
+    disruptive_students = 0
+    for obs in obs_list:
+        if any(
+            b in _OBSERVABLE_DISRUPTIVE_BEHAVIORS
+            for b in obs.visible_behaviors
+        ):
+            disruptive_students += 1
+
+    fraction = disruptive_students / float(len(obs_list))
+    if fraction <= _CLASS_CLIMATE_CALM_MAX:
+        return "calm"
+    if fraction <= _CLASS_CLIMATE_MIXED_MAX:
+        return "mixed"
+    return "chaotic"
+
+
 def canonicalize_hypothesis_label(raw: str | None) -> str:
     """Map any caller-supplied label into ``HYPOTHESIS_LABELS``.
 
@@ -326,14 +398,24 @@ class StudentObservation:
 class TeacherObservationBatch:
     """All observations the teacher has available at one turn.
 
-    Holds the per-student observations plus a small set of class-level
-    cues that are already derived in
-    ``ClassroomObservation`` (turn, class_mood) and safe to surface.
+    Holds the per-student observations plus two class-level cues:
+
+      * ``class_mood``: the legacy classroom-side label derived
+        from latent ``distress_level`` / ``attention`` averages.
+        Retained on the batch for backward compatibility with
+        any downstream consumer that still reads it, but the
+        teacher emotion update path no longer consults it.
+      * ``climate``: the Phase 6 slice 7 behavior-derived label
+        from ``derive_class_climate``. One of
+        ``CLASS_CLIMATE_LABELS`` (``calm`` / ``mixed`` /
+        ``chaotic``). This is the authoritative teacher-facing
+        class climate signal.
     """
 
     turn: int
     class_mood: str
     observations: tuple[StudentObservation, ...]
+    climate: str = "calm"
 
     def by_student_id(self) -> dict[str, StudentObservation]:
         return {o.student_id: o for o in self.observations}
@@ -645,19 +727,28 @@ def build_observations_from_classroom(
                 is_managed=bool(s.is_managed),
             )
         )
+    # Phase 6 slice 7: derive the behavior-only class climate
+    # from the (noisy-or-clean) StudentObservation list. This
+    # becomes the authoritative teacher-facing climate signal
+    # consumed by TeacherEmotionalState.update_after_turn.
+    climate = derive_class_climate(observations)
+
     return TeacherObservationBatch(
         turn=turn,
         class_mood=class_mood,
         observations=tuple(observations),
+        climate=climate,
     )
 
 
 __all__ = [
     "LATENT_FIELD_BLACKLIST",
     "HYPOTHESIS_LABELS",
+    "CLASS_CLIMATE_LABELS",
     "canonicalize_hypothesis_label",
     "observable_response_label",
     "observable_response_effect",
+    "derive_class_climate",
     "StudentObservation",
     "TeacherObservationBatch",
     "TeacherHypothesis",

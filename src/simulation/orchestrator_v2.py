@@ -1058,10 +1058,19 @@ class OrchestratorV2:
             # 7. Log teacher action as interaction event
             self._log_teacher_action(action, self._stream_obs, turn)
 
-            # 7b. Update teacher emotional state
+            # 7b. Update teacher emotional state from the
+            # Phase 6 slice 7 BEHAVIOR-DERIVED class climate
+            # (``teacher_batch.climate``) rather than the legacy
+            # latent-derived ``class_mood`` field. The climate
+            # is one of {"calm", "mixed", "chaotic"}; the
+            # dispatch inside ``update_after_turn`` maps
+            # "chaotic" → on_chaotic_mood and "calm" →
+            # on_calm_mood, so the existing emotion ladder still
+            # fires correctly without any TeacherEmotionalState
+            # changes.
             n_incidents = len(info.get("interactions", []))
             self.teacher_emotions.update_after_turn(
-                self._stream_obs.class_mood, n_incidents
+                teacher_batch.climate, n_incidents
             )
 
             # 7c. Sample teacher patience (post-update) for calibration metrics
