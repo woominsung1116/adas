@@ -360,6 +360,15 @@ class ClassroomObservation:
     student_summaries: list[StudentSummary]
     detailed_observations: list[DetailedObservation]
 
+    # Phase 6 slice 18: behavior-derived class mood label.
+    # One of {"calm", "tense", "chaotic"}, computed from the
+    # fraction of peers currently exhibiting any behavior in
+    # _STUDENT_VISIBLE_DISRUPTIVE_BEHAVIORS. Does NOT read
+    # latent distress_level / attention / compliance /
+    # escalation_risk. Retained for backward compatibility
+    # with legacy consumers that still read the field; active
+    # teacher decision / emotion / memory paths were already
+    # migrated off it in earlier Phase 6 slices.
     class_mood: str
     identified_adhd_ids: list[str]
     managed_ids: list[str]
@@ -1808,17 +1817,18 @@ class ClassroomV2:
                     recent_interactions=recent,
                 ))
 
-        # Class mood aggregate
-        avg_distress = _mean([s.state.get("distress_level", 0.1) for s in self.students])
-        avg_attention = _mean([s.state.get("attention", 0.5) for s in self.students])
-        if avg_distress > 0.5:
-            class_mood = "tense"
-        elif avg_attention > 0.6:
-            class_mood = "focused"
-        elif avg_attention < 0.35:
-            class_mood = "distracted"
-        else:
-            class_mood = "neutral"
+        # Phase 6 slice 18: collapse the legacy latent class-mood
+        # derivation. Previously this block computed the label
+        # from hidden aggregate averages, which left a
+        # latent-derived artifact on the public
+        # ClassroomObservation even though no live teacher
+        # decision path still consulted it. The slice 17
+        # behavior-derived helper is reused here so BOTH the
+        # student-side ClassroomContext and the legacy-compat
+        # ClassroomObservation now surface the same
+        # observable-only label computed from peer
+        # exhibited_behaviors via _STUDENT_VISIBLE_DISRUPTIVE_BEHAVIORS.
+        class_mood = self._derive_student_class_mood()
 
         return ClassroomObservation(
             turn=self.turn,
