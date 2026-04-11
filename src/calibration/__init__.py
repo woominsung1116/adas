@@ -42,6 +42,38 @@ from .adapters import (
     run_real_bundle,
 )
 
+from .prior_predictive import (
+    PriorPredictiveReport,
+    run_prior_predictive_check,
+)
+
+from .proposer import (
+    ParameterSpec,
+    SearchSpace,
+    Trial,
+    ProposerBase,
+    RandomProposer,
+    LatinHypercubeProposer,
+    GridProposer,
+    BayesianProposer,
+    make_proposer,
+)
+
+from .orchestrator import (
+    EvaluatorProtocol,
+    RunState,
+    OrchestratorResult,
+    AutoresearchOrchestrator,
+)
+
+from .applier import (
+    ConfigKey,
+    parse_key,
+    parameter_override,
+    DefaultEvaluator,
+    build_default_evaluator,
+)
+
 __all__ = [
     # loss
     "LossResult",
@@ -66,4 +98,28 @@ __all__ = [
     # adapters
     "class_result_to_history",
     "run_real_bundle",
+    # prior predictive
+    "PriorPredictiveReport",
+    "run_prior_predictive_check",
+    # proposer
+    "ParameterSpec",
+    "SearchSpace",
+    "Trial",
+    "ProposerBase",
+    "RandomProposer",
+    "LatinHypercubeProposer",
+    "GridProposer",
+    "BayesianProposer",
+    "make_proposer",
+    # orchestrator
+    "EvaluatorProtocol",
+    "RunState",
+    "OrchestratorResult",
+    "AutoresearchOrchestrator",
+    # applier
+    "ConfigKey",
+    "parse_key",
+    "parameter_override",
+    "DefaultEvaluator",
+    "build_default_evaluator",
 ]
