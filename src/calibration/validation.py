@@ -211,6 +211,45 @@ def _append_scenario_line(lines: list[str], result: ValidationResult) -> None:
 # ---------------------------------------------------------------------------
 
 
+class ScenarioSplitError(ValueError):
+    """Raised when a training/held-out split is not disjoint.
+
+    A held-out validation report is only meaningful if the held-out
+    scenarios were not also used for fitting. This error fails loudly
+    instead of silently producing a misleading gap metric.
+    """
+
+    def __init__(
+        self,
+        overlapping_keys: list[tuple],
+        training: list,
+        heldout: list,
+    ) -> None:
+        self.overlapping_keys = list(overlapping_keys)
+        self.training = list(training)
+        self.heldout = list(heldout)
+        key_str = ", ".join(repr(k) for k in overlapping_keys)
+        super().__init__(
+            f"training and held-out scenario splits overlap on "
+            f"{len(overlapping_keys)} key(s): {key_str}. "
+            f"Every held-out scenario must differ from every training "
+            f"scenario in at least one of (archetype, seed, max_turns, "
+            f"n_students, n_classes)."
+        )
+
+
+def _scenario_overlap_keys(
+    a: list,
+    b: list,
+) -> list[tuple]:
+    """Return the shared identity keys between two scenario lists."""
+    def _key(s) -> tuple:
+        return (s.archetype, s.seed, s.max_turns, s.n_students, s.n_classes)
+
+    a_keys = {_key(s) for s in a}
+    return sorted(k for k in a_keys if k in {_key(s) for s in b})
+
+
 def scenarios_overlap(
     a: list[ValidationScenario],
     b: list[ValidationScenario],
@@ -348,7 +387,23 @@ def build_held_out_report(
     supported_rules: list[SupportedRule] | None = None,
     unsupported_rules: list[UnsupportedRule] | None = None,
 ) -> HeldOutValidationReport:
-    """Run both sides of a train/heldout split and build an aggregate report."""
+    """Run both sides of a train/heldout split and build an aggregate report.
+
+    Enforces split disjointness: if any held-out scenario shares an
+    identity key (archetype, seed, max_turns, n_students, n_classes)
+    with a training scenario, `ScenarioSplitError` is raised before
+    any simulator work runs. If `training_scenarios` is empty, no
+    overlap check is performed (there is nothing to overlap with).
+    """
+    if training_scenarios and heldout_scenarios:
+        overlap = _scenario_overlap_keys(training_scenarios, heldout_scenarios)
+        if overlap:
+            raise ScenarioSplitError(
+                overlapping_keys=overlap,
+                training=training_scenarios,
+                heldout=heldout_scenarios,
+            )
+
     training_results = evaluate_config_on_scenarios(
         config=config,
         scenarios=training_scenarios,

@@ -45,6 +45,7 @@ from .constraints import (
     SupportedRule,
     UnsupportedRule,
     parse_constraints,
+    partition_rules_by_tunability,
 )
 from .search_space_loader import (
     LoadedSearchSpace,
@@ -84,6 +85,13 @@ class DefaultAutoresearchSetup:
     orchestrator: AutoresearchOrchestrator
     supported_rules: list[SupportedRule] = field(default_factory=list)
     unsupported_rules: list[UnsupportedRule] = field(default_factory=list)
+    # Supported rules that reference ONLY fields frozen outside the
+    # search space. These are parsed and surfaced for transparency but
+    # NOT enforced by the orchestrator, because their verdict cannot
+    # be changed by the proposer — enforcing them would either be a
+    # no-op (constant true) or degenerate the entire run into all
+    # penalty trials (constant false).
+    non_tunable_rules: list[SupportedRule] = field(default_factory=list)
 
     def summary(self) -> str:
         """One-line human-readable summary of the setup."""
@@ -94,6 +102,8 @@ class DefaultAutoresearchSetup:
             f"n_params={len(ls.space)}, "
             f"n_constraints={len(ls.constraints)}, "
             f"supported_rules={len(self.supported_rules)}, "
+            f"enforced_rules={len(o.supported_constraints)}, "
+            f"non_tunable_rules={len(self.non_tunable_rules)}, "
             f"unsupported_rules={len(self.unsupported_rules)}, "
             f"unsupported_sections={len(ls.unsupported_sections)}, "
             f"proposer={o.proposer_kind}, "
@@ -147,6 +157,8 @@ class DefaultAutoresearchSetup:
             f"Search space: {len(ls.space)} parameters",
             f"Constraints: {len(ls.constraints)} raw "
             f"(supported: {len(self.supported_rules)}, "
+            f"enforced: {len(o.supported_constraints)}, "
+            f"non_tunable: {len(self.non_tunable_rules)}, "
             f"unsupported: {len(self.unsupported_rules)})",
             f"Metadata keys: {sorted(ls.metadata.keys())}",
             f"Unsupported sections: {ls.unsupported_sections}",
@@ -240,6 +252,19 @@ def build_default_autoresearch_setup(
         loaded_space.constraints
     )
 
+    # Narrow enforcement: a supported rule is only enforced if at
+    # least one of its referenced fields is actually in the search
+    # space. Rules that depend entirely on frozen PROFILE_DELTAS
+    # fields are surfaced on the bundle as `non_tunable_rules` but
+    # never reach the orchestrator — otherwise the default harness
+    # produces a constant-false verdict for `adhd_hyperactive_impulsive`
+    # and every trial becomes a penalty, making the default path
+    # unusable.
+    tunable_keys = set(loaded_space.space.names())
+    enforceable_rules, non_tunable_rules = partition_rules_by_tunability(
+        supported_rules, tunable_keys
+    )
+
     # Build evaluator from target YAMLs
     evaluator = build_default_evaluator(
         n_classes=n_classes,
@@ -258,10 +283,14 @@ def build_default_autoresearch_setup(
     else:
         results_dir_path = Path(results_dir)
 
-    # Only forward supported rules if enforcement is on.
-    # Unsupported rules are always surfaced on the bundle for
-    # transparency regardless of enforcement.
-    orch_supported = supported_rules if enforce_constraints else []
+    # Only forward enforceable rules if enforcement is on.
+    # `enforceable_rules` ⊆ `supported_rules` — rules that our grammar
+    # supports AND whose referenced fields are all present in the
+    # search space. `non_tunable_rules` stay on the bundle for
+    # transparency but never reach the orchestrator.
+    # Unsupported rules are always surfaced on the bundle regardless
+    # of enforcement.
+    orch_supported = enforceable_rules if enforce_constraints else []
     orch_unsupported = unsupported_rules if enforce_constraints else []
 
     orchestrator = AutoresearchOrchestrator(
@@ -284,4 +313,5 @@ def build_default_autoresearch_setup(
         orchestrator=orchestrator,
         supported_rules=supported_rules,
         unsupported_rules=unsupported_rules,
+        non_tunable_rules=non_tunable_rules,
     )

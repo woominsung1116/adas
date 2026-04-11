@@ -15,6 +15,7 @@ from src.calibration import (
     ValidationScenario,
     ValidationResult,
     HeldOutValidationReport,
+    ScenarioSplitError,
     scenarios_overlap,
     evaluate_config_on_scenarios,
     build_held_out_report,
@@ -221,6 +222,90 @@ def test_default_setup_validate_best_on_heldout(setup_module_bundle):
     assert len(report.training_results) == 1
     assert len(report.heldout_results) == 1
     assert report.aggregate_heldout_loss() is not None
+
+
+# ---------------------------------------------------------------------------
+# Problem 2 regression: split overlap must be enforced, not just testable
+# ---------------------------------------------------------------------------
+
+
+def test_build_held_out_report_rejects_exact_overlap(setup_module_bundle):
+    setup = setup_module_bundle
+    shared = ValidationScenario(
+        name="same", archetype="quiet_structured",
+        seed=1, max_turns=20, n_students=5,
+    )
+    # Different label, identical identity key — still overlap.
+    heldout_alias = ValidationScenario(
+        name="same_relabeled", archetype="quiet_structured",
+        seed=1, max_turns=20, n_students=5,
+    )
+    with pytest.raises(ScenarioSplitError) as excinfo:
+        build_held_out_report(
+            config={},
+            training_scenarios=[shared],
+            heldout_scenarios=[heldout_alias],
+            naturalness_targets=setup.evaluator.naturalness_targets,
+            epidemiology_targets=setup.evaluator.epidemiology_targets,
+        )
+    err = excinfo.value
+    assert err.overlapping_keys
+    assert "archetype" in str(err) or "quiet_structured" in str(err)
+
+
+def test_build_held_out_report_accepts_disjoint_splits(setup_module_bundle):
+    setup = setup_module_bundle
+    training = [
+        ValidationScenario(name="t1", archetype="quiet_structured",
+                            seed=1, max_turns=20, n_students=5),
+    ]
+    heldout = [
+        ValidationScenario(name="h1", archetype="chaotic",
+                            seed=1, max_turns=20, n_students=5),
+    ]
+    # Should not raise — and should produce real results.
+    report = build_held_out_report(
+        config={},
+        training_scenarios=training,
+        heldout_scenarios=heldout,
+        naturalness_targets=setup.evaluator.naturalness_targets,
+        epidemiology_targets=setup.evaluator.epidemiology_targets,
+    )
+    assert len(report.training_results) == 1
+    assert len(report.heldout_results) == 1
+
+
+def test_validate_best_on_heldout_rejects_overlap(setup_module_bundle):
+    setup = setup_module_bundle
+    shared = [
+        ValidationScenario(name="s", archetype="chaotic",
+                            seed=9, max_turns=20, n_students=5),
+    ]
+    with pytest.raises(ScenarioSplitError):
+        setup.validate_best_on_heldout(
+            best_config={},
+            scenarios=shared,
+            training_scenarios=shared,
+        )
+
+
+def test_build_held_out_report_no_training_skips_check(setup_module_bundle):
+    """With an empty training list, there is nothing to overlap with
+    — the check is skipped and the report runs normally."""
+    setup = setup_module_bundle
+    heldout = [
+        ValidationScenario(name="h", archetype="chaotic",
+                            seed=1, max_turns=20, n_students=5),
+    ]
+    report = build_held_out_report(
+        config={},
+        training_scenarios=[],
+        heldout_scenarios=heldout,
+        naturalness_targets=setup.evaluator.naturalness_targets,
+        epidemiology_targets=setup.evaluator.epidemiology_targets,
+    )
+    assert len(report.heldout_results) == 1
+    assert report.aggregate_training_loss() is None
 
 
 def test_default_setup_validate_best_on_heldout_without_training(setup_module_bundle):

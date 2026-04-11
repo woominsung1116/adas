@@ -357,6 +357,55 @@ def check_constraints(
 # ---------------------------------------------------------------------------
 
 
+def rule_field_keys(rule: SupportedRule) -> list[str]:
+    """Return the dotted config keys a rule depends on.
+
+    Used by the default setup to decide whether every field a rule
+    references is actually tunable in the current search space. Rules
+    whose fields are entirely frozen (not in the search space) cannot
+    be satisfied or violated by the proposer — they resolve against
+    live PROFILE_DELTAS only, and therefore any verdict is a property
+    of the simulator defaults, not of autoresearch.
+    """
+    keys = [f"{rule.profile}.{rule.left[0]}.{rule.left[1]}"]
+    if rule.right is not None:
+        keys.append(f"{rule.profile}.{rule.right[0]}.{rule.right[1]}")
+    return keys
+
+
+def partition_rules_by_tunability(
+    supported_rules: list[SupportedRule],
+    tunable_keys: set[str],
+) -> tuple[list[SupportedRule], list[SupportedRule]]:
+    """Split supported rules into (enforceable, non_tunable).
+
+    A rule is *enforceable* only if EVERY field it references is in
+    the search space. If any referenced field is frozen in
+    PROFILE_DELTAS, the proposer cannot fully control the rule's
+    verdict — it becomes a fixed value of the simulator defaults.
+    In the best case that is a no-op; in the worst case it is a
+    constant-false verdict that degenerates the entire run into
+    penalty trials (see `adhd_hyperactive_impulsive` under the
+    current harness: `|impulse_override| > |att_bandwidth|` with
+    `att_bandwidth` frozen at -1 can never be satisfied inside the
+    proposer's range). We therefore refuse to enforce such rules
+    here; they stay on the bundle as `non_tunable` for transparency.
+
+    Returns:
+        (enforceable, non_tunable) where both are disjoint subsets of
+        the input list.
+    """
+    enforceable: list[SupportedRule] = []
+    non_tunable: list[SupportedRule] = []
+    for rule in supported_rules:
+        keys = rule_field_keys(rule)
+        if keys and all(k in tunable_keys for k in keys):
+            enforceable.append(rule)
+        else:
+            non_tunable.append(rule)
+    return enforceable, non_tunable
+
+
 class ConstraintViolationError(Exception):
     """Raised by the evaluator path when a config violates supported constraints.
 

@@ -451,8 +451,11 @@ def test_orchestrator_tsv_constraint_violation_row(tmp_path):
 
 
 def test_default_setup_loads_and_parses_harness_constraints(tmp_path):
-    """The default factory must parse harness constraints into supported /
-    unsupported lists and forward supported ones to the orchestrator."""
+    """The default factory parses harness constraints into supported /
+    unsupported lists. Supported rules that reference only
+    non-tunable (frozen) fields are sorted into `non_tunable_rules`
+    and NOT forwarded to the orchestrator — this is the narrow
+    enforcement policy that keeps the default path non-degenerate."""
     setup = build_default_autoresearch_setup(
         n_iterations=1,
         n_starts=1,
@@ -465,9 +468,15 @@ def test_default_setup_loads_and_parses_harness_constraints(tmp_path):
     # At least the max-severity clause is unsupported
     assert len(setup.unsupported_rules) >= 1
 
-    # Orchestrator received the supported rules
-    assert setup.orchestrator.supported_constraints
-    assert len(setup.orchestrator.supported_constraints) == len(setup.supported_rules)
+    # Enforced = subset of supported that the proposer can actually
+    # move. For the current harness this may be empty (all rules
+    # reference frozen PROFILE_DELTAS fields), but we must NEVER
+    # forward a non-tunable rule to the orchestrator — that would
+    # degenerate every trial into a constraint-violation penalty.
+    enforced = setup.orchestrator.supported_constraints
+    assert len(enforced) + len(setup.non_tunable_rules) == len(setup.supported_rules)
+    for rule in enforced:
+        assert rule not in setup.non_tunable_rules
 
 
 def test_default_setup_enforce_constraints_false(tmp_path):
@@ -496,9 +505,12 @@ def test_default_setup_summary_shows_constraint_counts(tmp_path):
     )
     s = setup.summary()
     assert "supported_rules=" in s
+    assert "enforced_rules=" in s
+    assert "non_tunable_rules=" in s
     assert "unsupported_rules=" in s
     r = setup.report()
-    assert "constraint enforcement: active" in r
+    assert "enforced:" in r
+    assert "non_tunable:" in r
 
 
 def test_default_setup_report_marks_enforcement_inactive(tmp_path):
@@ -512,3 +524,82 @@ def test_default_setup_report_marks_enforcement_inactive(tmp_path):
     )
     r = setup.report()
     assert "constraint enforcement: inactive" in r
+
+
+# ==========================================================================
+# partition_rules_by_tunability
+# ==========================================================================
+
+
+def test_partition_rules_by_tunability_requires_all_fields_present():
+    from src.calibration.constraints import partition_rules_by_tunability
+
+    tunable = parse_rule("delta.emotional.anxiety > 0", profile="anxiety")
+    non_tunable_unary = parse_rule(
+        "delta.emotional.anger > 0", profile="odd"
+    )
+    partially_frozen = parse_rule(
+        "abs(delta.cognitive.att_bandwidth) > abs(delta.cognitive.impulse_override)",
+        profile="adhd_inattentive",
+    )
+
+    tunable_keys = {
+        "anxiety.emotional.anxiety",
+        "adhd_inattentive.cognitive.att_bandwidth",
+    }
+
+    enforceable, non_tunable = partition_rules_by_tunability(
+        [tunable, non_tunable_unary, partially_frozen], tunable_keys
+    )
+    # anxiety rule: single field, present → enforceable
+    assert tunable in enforceable
+    # odd rule: single field, absent → non-tunable
+    assert non_tunable_unary in non_tunable
+    # adhd_inattentive abs_gt: one field present, one frozen → non-tunable
+    # (ALL-fields policy; partial tunability is not enough because
+    # the frozen field can make the verdict constant)
+    assert partially_frozen in non_tunable
+
+
+# ==========================================================================
+# Problem 1 regression: default path must NOT degenerate into all-penalty
+# ==========================================================================
+
+
+def test_default_setup_default_path_is_not_degenerate(tmp_path):
+    """Under the current harness, every supported rule references at
+    least one field frozen outside the search space. Before this pass
+    they were all forwarded to the orchestrator and every trial got
+    a CONSTRAINT_VIOLATION_PENALTY. After narrow enforcement, the
+    orchestrator receives zero enforceable rules from the harness,
+    so trials run normally.
+    """
+    from src.calibration.orchestrator import CONSTRAINT_VIOLATION_PENALTY
+
+    setup = build_default_autoresearch_setup(
+        n_iterations=3,
+        n_starts=1,
+        n_classes=1,
+        max_turns=20,
+        n_students=5,
+        results_dir=tmp_path,
+        enforce_constraints=True,
+        seed=7,
+    )
+
+    # All current harness supported rules must be classified as
+    # non-tunable under the ALL-fields policy — this is the specific
+    # condition that used to cause the degenerate run.
+    assert len(setup.non_tunable_rules) == len(setup.supported_rules)
+    assert setup.orchestrator.supported_constraints == []
+
+    result = setup.orchestrator.run()
+    run = result.runs[0]
+    # At least one trial must avoid the constraint-violation penalty.
+    non_penalty = [
+        t for t in run.history
+        if t.loss != CONSTRAINT_VIOLATION_PENALTY
+    ]
+    assert non_penalty, (
+        "default autoresearch run degenerated into all-penalty trials"
+    )
