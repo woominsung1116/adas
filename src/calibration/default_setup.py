@@ -207,6 +207,8 @@ def build_default_autoresearch_setup(
     epidemiology_yaml: Path | str | None = None,
     # Constraint enforcement
     enforce_constraints: bool = True,
+    # Phase 6 slice 10: teacher-memory retrieval noise
+    retrieval_noise_config: Any = None,
 ) -> DefaultAutoresearchSetup:
     """Assemble a ready-to-run autoresearch setup from harness YAMLs.
 
@@ -265,13 +267,18 @@ def build_default_autoresearch_setup(
         supported_rules, tunable_keys
     )
 
-    # Build evaluator from target YAMLs
+    # Build evaluator from target YAMLs. Phase 6 slice 10
+    # forwards the retrieval-noise config into every
+    # orchestrator constructed inside the evaluator so
+    # enabling imperfect recall is a one-line change at the
+    # setup-factory level.
     evaluator = build_default_evaluator(
         n_classes=n_classes,
         max_turns=max_turns,
         seed=seed,
         naturalness_yaml=naturalness_yaml,
         epidemiology_yaml=epidemiology_yaml,
+        retrieval_noise_config=retrieval_noise_config,
     )
     # Propagate n_students override (build_default_evaluator doesn't
     # take it directly, but DefaultEvaluator has the field)

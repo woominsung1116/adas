@@ -223,6 +223,10 @@ class DefaultEvaluator(EvaluatorProtocol):
       max_turns: cap on MAX_TURNS (for fast search iterations)
       seed: deterministic seed
       n_students: students per class
+      retrieval_noise_config: optional teacher-memory retrieval
+        noise config (Phase 6 slice 9). When None, the default
+        (no-op) inside TeacherMemory is used; existing callers
+        see no behavior change.
     """
 
     naturalness_targets: list
@@ -231,6 +235,7 @@ class DefaultEvaluator(EvaluatorProtocol):
     max_turns: int = 200
     seed: int | None = 42
     n_students: int = 20
+    retrieval_noise_config: Any = None
 
     def evaluate(self, config: dict[str, Any]) -> tuple[Any, LossResult]:
         """Apply config, run N classes, compute combined loss.
@@ -256,7 +261,10 @@ class DefaultEvaluator(EvaluatorProtocol):
                     (self.seed + class_idx) if self.seed is not None else None
                 )
                 orch = OrchestratorV2(
-                    n_students=self.n_students, max_classes=1, seed=class_seed
+                    n_students=self.n_students,
+                    max_classes=1,
+                    seed=class_seed,
+                    retrieval_noise_config=self.retrieval_noise_config,
                 )
                 orch.classroom.MAX_TURNS = self.max_turns
                 sub = run_real_bundle(orch, n_classes=1)
@@ -276,8 +284,15 @@ def build_default_evaluator(
     seed: int | None = 42,
     naturalness_yaml=None,
     epidemiology_yaml=None,
+    retrieval_noise_config: Any = None,
 ) -> DefaultEvaluator:
-    """Helper: load YAML targets and return a ready-to-use evaluator."""
+    """Helper: load YAML targets and return a ready-to-use evaluator.
+
+    Phase 6 slice 10: ``retrieval_noise_config`` is forwarded into
+    every orchestrator constructed by this evaluator, so enabling
+    teacher-memory retrieval noise for a whole calibration run is
+    a single-argument change at the factory level.
+    """
     from .loader import load_targets, default_harness_paths
 
     if naturalness_yaml is None or epidemiology_yaml is None:
@@ -294,4 +309,5 @@ def build_default_evaluator(
         n_classes=n_classes,
         max_turns=max_turns,
         seed=seed,
+        retrieval_noise_config=retrieval_noise_config,
     )

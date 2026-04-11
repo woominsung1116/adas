@@ -324,6 +324,7 @@ try:
         PendingObservationFeedback,
         PendingHypothesisFeedback,
         FeedbackDelayQueue,
+        RetrievalNoiseConfig,
         HYPERACTIVITY_BEHAVIORS,
         IMPULSIVITY_BEHAVIORS,
         INATTENTION_BEHAVIORS,
@@ -689,17 +690,26 @@ class OrchestratorV2:
         feedback_rate: float = 0.30,
         feedback_delay_turns: int = 1,
         teacher_noise_config: TeacherNoiseConfig | None = None,
+        retrieval_noise_config: RetrievalNoiseConfig | None = None,
     ):
         self.log = InteractionLog()
         self.classroom = ClassroomV2(
             n_students=n_students, seed=seed, interaction_log=self.log,
         )
+        # Phase 6 slice 10: retrieval noise config is threaded
+        # through the TeacherMemory constructor so callers can
+        # enable imperfect recall without mutating the memory
+        # object post-construction. When None is supplied, the
+        # TeacherMemory default (no-op) stays in place and
+        # legacy ``retrieval_noise`` scalar behavior is
+        # preserved unchanged.
         self.memory = TeacherMemory(
             retrieval_noise=0.20,
             principle_promotion_threshold=7,
             principle_min_classes=3,
             memory_decay_rate=0.99,
             seed=seed,
+            retrieval_noise_config=retrieval_noise_config,
         )
         self.evaluator = IdentificationEvaluator()
         self.growth = GrowthTracker()
