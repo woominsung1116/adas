@@ -84,6 +84,11 @@ from .search_space_loader import (
     default_student_ranges_path,
 )
 
+from .default_setup import (
+    DefaultAutoresearchSetup,
+    build_default_autoresearch_setup,
+)
+
 __all__ = [
     # loss
     "LossResult",
@@ -140,4 +145,7 @@ __all__ = [
     "load_default_search_space",
     "build_default_search_space",
     "default_student_ranges_path",
+    # default setup
+    "DefaultAutoresearchSetup",
+    "build_default_autoresearch_setup",
 ]
