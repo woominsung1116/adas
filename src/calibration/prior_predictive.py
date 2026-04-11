@@ -103,6 +103,7 @@ def run_prior_predictive_check(
     seed: int | None = 42,
     naturalness_yaml: Any = None,
     epidemiology_yaml: Any = None,
+    retrieval_noise_config: Any = None,
 ) -> PriorPredictiveReport:
     """Run a prior predictive check with literature default parameters.
 
@@ -114,6 +115,12 @@ def run_prior_predictive_check(
         naturalness_yaml / epidemiology_yaml: override YAML paths; if None,
                    uses `.harness/naturalness_targets.yaml` and
                    `.harness/epidemiology_targets.yaml`.
+        retrieval_noise_config: Phase 6 slice 11 optional
+                   ``RetrievalNoiseConfig`` forwarded into every
+                   orchestrator constructed by this helper. When
+                   ``None`` (default), the simulator runs with the
+                   legacy ``retrieval_noise`` scalar path — bit-
+                   identical to the pre-slice baseline.
 
     Returns:
         PriorPredictiveReport with coverage stats + per-target breakdown.
@@ -138,7 +145,12 @@ def run_prior_predictive_check(
     bundle = CalibrationResultBundle(histories=[])
     for class_idx in range(n_classes):
         class_seed = (seed + class_idx) if seed is not None else None
-        orch = OrchestratorV2(n_students=20, max_classes=1, seed=class_seed)
+        orch = OrchestratorV2(
+            n_students=20,
+            max_classes=1,
+            seed=class_seed,
+            retrieval_noise_config=retrieval_noise_config,
+        )
         orch.classroom.MAX_TURNS = max_turns
         sub = run_real_bundle(orch, n_classes=1)
         bundle.histories.extend(sub.histories)

@@ -280,6 +280,7 @@ def _run_scenario_once(
     epidemiology_targets: list,
     supported_rules: list[SupportedRule] | None = None,
     unsupported_rules: list[UnsupportedRule] | None = None,
+    retrieval_noise_config: Any = None,
 ) -> ValidationResult:
     """Evaluate a config once on a single scenario and return a result.
 
@@ -326,6 +327,7 @@ def _run_scenario_once(
                     n_students=scenario.n_students,
                     max_classes=1,
                     seed=class_seed,
+                    retrieval_noise_config=retrieval_noise_config,
                 )
                 if scenario.archetype is not None:
                     orch.classroom.set_archetype(scenario.archetype)
@@ -361,8 +363,14 @@ def evaluate_config_on_scenarios(
     epidemiology_targets: list,
     supported_rules: list[SupportedRule] | None = None,
     unsupported_rules: list[UnsupportedRule] | None = None,
+    retrieval_noise_config: Any = None,
 ) -> list[ValidationResult]:
-    """Run a config on each scenario and return per-scenario results."""
+    """Run a config on each scenario and return per-scenario results.
+
+    Phase 6 slice 11: ``retrieval_noise_config`` is forwarded into
+    every orchestrator constructed inside ``_run_scenario_once``.
+    Defaults to ``None`` (legacy path — no behavior change).
+    """
     out: list[ValidationResult] = []
     for scenario in scenarios:
         result = _run_scenario_once(
@@ -372,6 +380,7 @@ def evaluate_config_on_scenarios(
             epidemiology_targets=epidemiology_targets,
             supported_rules=supported_rules,
             unsupported_rules=unsupported_rules,
+            retrieval_noise_config=retrieval_noise_config,
         )
         out.append(result)
     return out
@@ -386,6 +395,7 @@ def build_held_out_report(
     epidemiology_targets: list,
     supported_rules: list[SupportedRule] | None = None,
     unsupported_rules: list[UnsupportedRule] | None = None,
+    retrieval_noise_config: Any = None,
 ) -> HeldOutValidationReport:
     """Run both sides of a train/heldout split and build an aggregate report.
 
@@ -394,6 +404,11 @@ def build_held_out_report(
     with a training scenario, `ScenarioSplitError` is raised before
     any simulator work runs. If `training_scenarios` is empty, no
     overlap check is performed (there is nothing to overlap with).
+
+    Phase 6 slice 11: ``retrieval_noise_config`` is applied to
+    BOTH the training and held-out evaluation passes, so the
+    same imperfect-recall policy is used on both sides of the
+    split. Default ``None`` preserves legacy behavior.
     """
     if training_scenarios and heldout_scenarios:
         overlap = _scenario_overlap_keys(training_scenarios, heldout_scenarios)
@@ -411,6 +426,7 @@ def build_held_out_report(
         epidemiology_targets=epidemiology_targets,
         supported_rules=supported_rules,
         unsupported_rules=unsupported_rules,
+        retrieval_noise_config=retrieval_noise_config,
     )
     heldout_results = evaluate_config_on_scenarios(
         config=config,
@@ -419,6 +435,7 @@ def build_held_out_report(
         epidemiology_targets=epidemiology_targets,
         supported_rules=supported_rules,
         unsupported_rules=unsupported_rules,
+        retrieval_noise_config=retrieval_noise_config,
     )
     return HeldOutValidationReport(
         config=dict(config),

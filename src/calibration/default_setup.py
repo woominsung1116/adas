@@ -118,6 +118,7 @@ class DefaultAutoresearchSetup:
         best_config: dict[str, Any],
         scenarios: list,
         training_scenarios: list | None = None,
+        retrieval_noise_config: Any = None,
     ):
         """Convenience method: run held-out validation on `best_config`.
 
@@ -126,6 +127,13 @@ class DefaultAutoresearchSetup:
         constraints so validation respects the same enforcement policy
         as calibration.
 
+        Phase 6 slice 11: ``retrieval_noise_config`` is forwarded
+        into every orchestrator built by the validation path. If
+        the caller does NOT supply one, the method inherits the
+        evaluator's config so held-out validation uses the SAME
+        imperfect-recall policy the calibration run was scored
+        under. Pass an explicit value to override.
+
         Args:
             best_config: the config to validate (typically
                          `result.global_best_config` from an orchestrator run)
@@ -133,11 +141,20 @@ class DefaultAutoresearchSetup:
             training_scenarios: optional training-side scenarios;
                                 if provided, the returned report also
                                 includes train-vs-heldout gap
+            retrieval_noise_config: optional override for the
+                                    teacher-memory retrieval-noise
+                                    config to use during validation.
+                                    Defaults to the evaluator's.
 
         Returns:
             HeldOutValidationReport
         """
         from .validation import build_held_out_report
+        effective_noise = (
+            retrieval_noise_config
+            if retrieval_noise_config is not None
+            else getattr(self.evaluator, "retrieval_noise_config", None)
+        )
         return build_held_out_report(
             config=best_config,
             training_scenarios=list(training_scenarios or []),
@@ -146,6 +163,7 @@ class DefaultAutoresearchSetup:
             epidemiology_targets=self.evaluator.epidemiology_targets,
             supported_rules=self.orchestrator.supported_constraints,
             unsupported_rules=self.orchestrator.unsupported_constraints,
+            retrieval_noise_config=effective_noise,
         )
 
     def report(self) -> str:
