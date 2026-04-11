@@ -187,6 +187,116 @@ class ObservationRecord:
             self.action_taken = self.feedback.teacher_action
 
 
+@dataclass(frozen=True)
+class RetrievalNoiseConfig:
+    """Explicit, auditable teacher-memory retrieval noise knobs.
+
+    Phase 6 slice 9: the legacy ``retrieval_noise`` scalar (just
+    a per-result dropout probability) is too blunt to model
+    imperfect teacher recall — it can only remove candidates,
+    never reshuffle them. This config adds two orthogonal
+    levers that together produce a richer "I sort of remember
+    a similar case, maybe this one?" effect:
+
+      dropout_prob:
+        Per-candidate probability of forgetting the case
+        entirely at recall time. Clamped to ``[0.0, 1.0]``.
+      similarity_jitter:
+        Magnitude (``>= 0``) of additive uniform noise applied
+        to each candidate's similarity score BEFORE re-sorting.
+        Range: a single draw from
+        ``rng.uniform(-similarity_jitter, +similarity_jitter)``
+        is added to each similarity. Zero is a no-op.
+
+    Both levers default to zero so ``RetrievalNoiseConfig()`` is
+    a pure pass-through and existing TeacherMemory callers see
+    no behavior change.
+
+    Stored records are NEVER mutated by this config — the noise
+    layer operates on transient ``(similarity, record)`` tuples
+    copied out of the case base.
+    """
+
+    dropout_prob: float = 0.0
+    similarity_jitter: float = 0.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dropout_prob", _clamp01_local(self.dropout_prob))
+        if self.similarity_jitter < 0.0:
+            object.__setattr__(self, "similarity_jitter", 0.0)
+
+    @property
+    def is_disabled(self) -> bool:
+        return self.dropout_prob == 0.0 and self.similarity_jitter == 0.0
+
+    def as_dict(self) -> dict:
+        return {
+            "dropout_prob": self.dropout_prob,
+            "similarity_jitter": self.similarity_jitter,
+        }
+
+
+def _clamp01_local(value: float) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+
+def apply_retrieval_noise(
+    scored_results: list[tuple[float, "ObservationRecord"]],
+    rng: random.Random,
+    config: RetrievalNoiseConfig,
+) -> list[tuple[float, "ObservationRecord"]]:
+    """Apply explicit retrieval noise to a scored candidate list.
+
+    Phase 6 slice 9 substrate. Pure function:
+      * reads nothing but its arguments
+      * does NOT mutate ``scored_results`` or any record
+      * returns a NEW list of new tuples so callers can pass
+        the return value into any downstream consumer safely
+
+    Operation (in order):
+      1. For each ``(sim, record)`` tuple, add a uniform jitter
+         in ``[-similarity_jitter, +similarity_jitter]`` to
+         ``sim`` (unless jitter is zero — early-return path
+         consumes no RNG).
+      2. For each candidate, roll ``rng.random()`` against
+         ``dropout_prob`` and drop the candidate if it fires.
+      3. Re-sort the surviving candidates by perturbed sim,
+         descending.
+
+    When ``config.is_disabled`` the helper returns the input
+    list unchanged WITHOUT consuming any RNG state — this is
+    the invariant that keeps legacy callers bit-identical
+    to the pre-slice-9 baseline.
+    """
+    if config.is_disabled or not scored_results:
+        return list(scored_results)
+
+    jitter = config.similarity_jitter
+    dropout = config.dropout_prob
+
+    perturbed: list[tuple[float, "ObservationRecord"]] = []
+    for sim, record in scored_results:
+        if jitter > 0.0:
+            noisy_sim = sim + rng.uniform(-jitter, jitter)
+        else:
+            noisy_sim = sim
+        if dropout > 0.0 and rng.random() < dropout:
+            # Dropped: teacher forgot this case entirely.
+            continue
+        perturbed.append((noisy_sim, record))
+
+    perturbed.sort(key=lambda x: x[0], reverse=True)
+    return perturbed
+
+
 @dataclass
 class PendingObservationFeedback:
     """A memory commit queued for a later turn (Phase 6 slice 3).
@@ -616,6 +726,7 @@ class TeacherMemory:
         principle_min_classes: int = 3,
         memory_decay_rate: float = 0.99,
         seed: int | None = None,
+        retrieval_noise_config: RetrievalNoiseConfig | None = None,
     ) -> None:
         self.case_base = CaseBase()
         self.experience_base = ExperienceBase()
@@ -632,6 +743,15 @@ class TeacherMemory:
 
         # Phase 2 enhancements: noise, promotion gating, decay
         self.retrieval_noise = retrieval_noise
+        # Phase 6 slice 9: explicit retrieval noise config. Default
+        # is a no-op; ``retrieve_similar_cases`` falls back to the
+        # legacy ``retrieval_noise`` scalar when this config is
+        # disabled, so existing callers see no behavior change.
+        self.retrieval_noise_config: RetrievalNoiseConfig = (
+            retrieval_noise_config
+            if retrieval_noise_config is not None
+            else RetrievalNoiseConfig()
+        )
         self.principle_promotion_threshold = principle_promotion_threshold
         self.principle_min_classes = principle_min_classes
         self.memory_decay_rate = memory_decay_rate
@@ -820,7 +940,9 @@ class TeacherMemory:
             observation, top_k=top_k + 3, exclude_student_id=exclude_student_id
         )
 
-        # Apply memory decay: reduce similarity for old memories
+        # Apply memory decay: reduce similarity for old memories.
+        # Constructs NEW (similarity, record) tuples — records
+        # themselves are never mutated.
         decayed_results: list[tuple[float, ObservationRecord]] = []
         for sim, record in raw_results:
             age = max(0, self._turn - record.turn)
@@ -830,10 +952,20 @@ class TeacherMemory:
         # Re-sort after decay
         decayed_results.sort(key=lambda x: x[0], reverse=True)
 
-        # Apply retrieval noise: randomly drop ~noise_rate of results
-        noisy_results = [
-            r for r in decayed_results if self._rng.random() > rate
-        ]
+        # Phase 6 slice 9: explicit retrieval noise layer. When
+        # ``retrieval_noise_config`` is active, run similarity
+        # jitter + per-candidate dropout through the auditable
+        # ``apply_retrieval_noise`` helper. Otherwise fall back
+        # to the legacy blunt per-result dropout.
+        if not self.retrieval_noise_config.is_disabled:
+            noisy_results = apply_retrieval_noise(
+                decayed_results, self._rng, self.retrieval_noise_config
+            )
+        else:
+            # Legacy path: simple per-result dropout.
+            noisy_results = [
+                r for r in decayed_results if self._rng.random() > rate
+            ]
         return noisy_results[:top_k]
 
     # ------------------------------------------------------------------
