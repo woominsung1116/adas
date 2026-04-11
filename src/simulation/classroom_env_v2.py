@@ -1775,18 +1775,20 @@ class ClassroomV2:
         for i, student in enumerate(self.students):
             row, col = divmod(i, cols)
 
-            # Profile hint: teacher sees behavior-based hints, not true labels
-            if student.is_adhd and student.identified:
-                hint = "identified_adhd"
-            elif student.state.get("escalation_risk", 0) > 0.5:
-                hint = "disruptive"
-            elif student.state.get("attention", 1.0) < 0.3:
-                hint = "inattentive"
-            else:
-                hint = "typical"
-
-            # High-visibility behaviors only (disruptive ones visible from teacher desk)
+            # Phase 6 slice 19: observable-only StudentSummary.
+            # High-visibility behaviors first — the helper is now
+            # behavior-only (no latent fallback sentinels). We then
+            # re-derive ``profile_hint`` from the visible behavior
+            # set plus the teacher-side ``identified`` flag, matching
+            # the slice 14 teacher-observation boundary vocabulary
+            # {identified_adhd, disruptive, unknown}. Legacy latent
+            # labels (``inattentive`` / ``typical``) are never
+            # emitted.
             visible_behaviors = self._visible_behaviors(student)
+            hint = self._derive_observation_profile_hint(
+                visible_behaviors=visible_behaviors,
+                is_identified=bool(getattr(student, "identified", False)),
+            )
 
             summaries.append(StudentSummary(
                 student_id=student.student_id,
@@ -1843,23 +1845,56 @@ class ClassroomV2:
             managed_ids=sorted(self.managed_ids),
         )
 
+    def _derive_observation_profile_hint(
+        self,
+        visible_behaviors: list[str],
+        is_identified: bool,
+    ) -> str:
+        """Phase 6 slice 19: behavior-only ``StudentSummary.profile_hint``.
+
+        Vocabulary locked to ``{"identified_adhd", "disruptive",
+        "unknown"}``. Rules:
+
+          1. ``is_identified=True`` → ``"identified_adhd"``
+             (teacher-side flag, not latent truth).
+          2. any element of ``visible_behaviors`` is in the
+             disruptive vocabulary → ``"disruptive"``.
+          3. otherwise → ``"unknown"``.
+
+        Does NOT read ``student.state`` or any latent scalar.
+        Mirrors the slice 14 teacher-observation
+        ``_derive_profile_hint`` helper so the classroom side
+        and the teacher-observation side agree by construction.
+        """
+        if is_identified:
+            return "identified_adhd"
+        if any(
+            b in _STUDENT_VISIBLE_DISRUPTIVE_BEHAVIORS
+            for b in (visible_behaviors or ())
+        ):
+            return "disruptive"
+        return "unknown"
+
     def _visible_behaviors(self, student: CognitiveStudent) -> list[str]:
-        """Return only high-visibility behaviors the teacher can see from the front."""
+        """Return only high-visibility behaviors the teacher can see from the front.
+
+        Phase 6 slice 19: returns an empty list when the student
+        exhibits no high-visibility behavior this turn. Previous
+        versions fell through to latent-threshold sentinel
+        strings that were synthesized from student state reads.
+        Those sentinels carried hidden aggregate state into the
+        public StudentSummary.behaviors field. That surface is
+        now observable-only at the source; the teacher observation
+        builder still scrubs any surviving legacy sentinels
+        defensively.
+        """
         high_vis = {
             "out_of_seat", "calling_out", "interrupting", "excessive_talking",
             "running_in_classroom", "fidgeting", "emotional_outburst",
         }
         behaviors = getattr(student, "exhibited_behaviors", [])
-        visible = [b for b in behaviors if b in high_vis]
-        # If nothing high-vis, show a generic label
-        if not visible:
-            if student.state.get("attention", 1.0) < 0.3:
-                visible = ["seems_inattentive"]
-            elif student.state.get("compliance", 1.0) > 0.7:
-                visible = ["on_task"]
-            else:
-                visible = ["quiet"]
-        return visible
+        return [b for b in behaviors if b in high_vis]
+
 
 
 # ---------------------------------------------------------------------------
