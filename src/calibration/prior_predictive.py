@@ -38,6 +38,11 @@ class PriorPredictiveReport:
     loss_result: LossResult
     per_target: dict[str, dict] = field(default_factory=dict)
     # per_target[name] = {"in_range": bool, "measured": float, "range": (lo, hi)}
+    # Phase 6 slice 12: retrieval noise config that was active
+    # during the prior predictive check. Persisted for audit so
+    # readers of a report can tell which recall policy produced
+    # the numbers. ``None`` means the legacy path was in effect.
+    retrieval_noise_config: Any = None
 
     def n_in_range(self) -> int:
         return sum(1 for v in self.per_target.values() if v["in_range"])
@@ -54,6 +59,8 @@ class PriorPredictiveReport:
         lines = [
             f"=== Prior Predictive Check ===",
             f"N classes: {self.n_classes}, max_turns: {self.max_turns}, seed: {self.seed}",
+            f"Retrieval noise: "
+            f"{_format_retrieval_noise(self.retrieval_noise_config)}",
             f"Coverage: {self.n_in_range()}/{self.n_total()} "
             f"({self.coverage() * 100:.1f}%) targets in prior range",
             f"",
@@ -68,6 +75,17 @@ class PriorPredictiveReport:
             m_str = f"{m:.4f}" if m is not None else "N/A"
             lines.append(f"  {mark} {name:50s} {m_str} ∈ [{lo}, {hi}]")
         return "\n".join(lines)
+
+
+def _format_retrieval_noise(cfg: Any) -> str:
+    """Compact renderer mirroring ``default_setup._format_retrieval_noise_config``."""
+    if cfg is None:
+        return "disabled"
+    dropout = getattr(cfg, "dropout_prob", 0.0)
+    jitter = getattr(cfg, "similarity_jitter", 0.0)
+    if dropout == 0.0 and jitter == 0.0:
+        return "disabled"
+    return f"dropout={dropout:.3f},jitter={jitter:.3f}"
 
 
 def _evaluate_targets_on_bundle(
@@ -168,4 +186,5 @@ def run_prior_predictive_check(
         bundle=bundle,
         loss_result=loss_result,
         per_target=per_target,
+        retrieval_noise_config=retrieval_noise_config,
     )

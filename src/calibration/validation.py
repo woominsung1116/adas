@@ -125,6 +125,11 @@ class HeldOutValidationReport:
     heldout_scenarios: list[ValidationScenario] = field(default_factory=list)
     training_results: list[ValidationResult] = field(default_factory=list)
     heldout_results: list[ValidationResult] = field(default_factory=list)
+    # Phase 6 slice 12: retrieval noise config that was active
+    # during this validation run. Persisted for audit so
+    # readers of the report can tell which recall policy
+    # produced the training / held-out loss numbers.
+    retrieval_noise_config: Any = None
 
     def training_losses(self) -> list[float]:
         return [r.loss.total for r in self.training_results if r.error is None]
@@ -164,6 +169,8 @@ class HeldOutValidationReport:
             f"Config: {len(self.config)} parameter overrides",
             f"Training scenarios: {len(self.training_scenarios)}",
             f"Held-out scenarios: {len(self.heldout_scenarios)}",
+            f"Retrieval noise: "
+            f"{_format_retrieval_noise(self.retrieval_noise_config)}",
         ]
 
         t_agg = self.aggregate_training_loss()
@@ -193,6 +200,17 @@ class HeldOutValidationReport:
             for r in self.heldout_results:
                 _append_scenario_line(lines, r)
         return "\n".join(lines)
+
+
+def _format_retrieval_noise(cfg: Any) -> str:
+    """Compact renderer shared with default_setup / prior_predictive."""
+    if cfg is None:
+        return "disabled"
+    dropout = getattr(cfg, "dropout_prob", 0.0)
+    jitter = getattr(cfg, "similarity_jitter", 0.0)
+    if dropout == 0.0 and jitter == 0.0:
+        return "disabled"
+    return f"dropout={dropout:.3f},jitter={jitter:.3f}"
 
 
 def _append_scenario_line(lines: list[str], result: ValidationResult) -> None:
@@ -443,4 +461,5 @@ def build_held_out_report(
         heldout_scenarios=list(heldout_scenarios),
         training_results=training_results,
         heldout_results=heldout_results,
+        retrieval_noise_config=retrieval_noise_config,
     )

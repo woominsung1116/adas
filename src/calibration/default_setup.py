@@ -97,6 +97,8 @@ class DefaultAutoresearchSetup:
         """One-line human-readable summary of the setup."""
         ls = self.loaded_space
         o = self.orchestrator
+        retrieval_cfg = getattr(self.evaluator, "retrieval_noise_config", None)
+        retrieval_str = _format_retrieval_noise_config(retrieval_cfg)
         return (
             f"DefaultAutoresearchSetup("
             f"n_params={len(ls.space)}, "
@@ -109,7 +111,8 @@ class DefaultAutoresearchSetup:
             f"proposer={o.proposer_kind}, "
             f"n_starts={o.n_starts}, "
             f"n_iterations={o.n_iterations}, "
-            f"results_dir={o.results_dir})"
+            f"results_dir={o.results_dir}, "
+            f"retrieval_noise={retrieval_str})"
         )
 
     def validate_best_on_heldout(
@@ -196,8 +199,29 @@ class DefaultAutoresearchSetup:
             f"  n_students: {self.evaluator.n_students}",
             f"  naturalness targets: {len(self.evaluator.naturalness_targets)}",
             f"  epidemiology targets: {len(self.evaluator.epidemiology_targets)}",
+            "",
+            "Phase 6 noise policy:",
+            f"  retrieval_noise_config: "
+            f"{_format_retrieval_noise_config(getattr(self.evaluator, 'retrieval_noise_config', None))}",
         ]
         return "\n".join(lines)
+
+
+def _format_retrieval_noise_config(cfg: Any) -> str:
+    """Compact, deterministic string rendering of a retrieval noise config.
+
+    Returns ``"disabled"`` when the config is missing or both of
+    its knobs are zero; otherwise a compact key=value string. Used
+    by both ``summary()`` and ``report()`` so the two surfaces
+    agree on wording.
+    """
+    if cfg is None:
+        return "disabled"
+    dropout = getattr(cfg, "dropout_prob", 0.0)
+    jitter = getattr(cfg, "similarity_jitter", 0.0)
+    if dropout == 0.0 and jitter == 0.0:
+        return "disabled"
+    return f"dropout={dropout:.3f},jitter={jitter:.3f}"
 
 
 # ---------------------------------------------------------------------------

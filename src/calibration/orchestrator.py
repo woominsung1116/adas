@@ -360,6 +360,28 @@ class AutoresearchOrchestrator:
     # ------------------------------------------------------------------
 
     def save_checkpoint(self, result: OrchestratorResult, completed_runs: int) -> None:
+        # Phase 6 slice 12: persist the retrieval noise config
+        # that was active during the run so post-hoc readers can
+        # tell which imperfect-recall policy produced the numbers.
+        # We read through the evaluator — orchestrator itself
+        # does not own the config. Renders to ``None`` when the
+        # evaluator either has no attribute or carries the default
+        # (no-op) policy.
+        retrieval_noise_blob: Any = None
+        ev_cfg = getattr(self.evaluator, "retrieval_noise_config", None)
+        if ev_cfg is not None:
+            try:
+                retrieval_noise_blob = ev_cfg.as_dict()
+            except Exception:
+                retrieval_noise_blob = {
+                    "dropout_prob": float(
+                        getattr(ev_cfg, "dropout_prob", 0.0)
+                    ),
+                    "similarity_jitter": float(
+                        getattr(ev_cfg, "similarity_jitter", 0.0)
+                    ),
+                }
+
         payload = {
             "completed_runs": completed_runs,
             "global_best_loss": result.global_best_loss,
@@ -369,6 +391,7 @@ class AutoresearchOrchestrator:
             "n_iterations": self.n_iterations,
             "n_starts": self.n_starts,
             "proposer_kind": self.proposer_kind,
+            "retrieval_noise_config": retrieval_noise_blob,
             "timestamp": time.time(),
         }
         with open(self.checkpoint_path, "w", encoding="utf-8") as f:
