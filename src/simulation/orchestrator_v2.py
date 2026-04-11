@@ -722,6 +722,19 @@ class OrchestratorV2:
         self._stream_obs = obs
         self._hypothesis_trackers = {}  # reset per class
 
+        # Calibration-oriented per-turn accumulators (exported to ClassHistory).
+        # - patience_log: teacher patience value sampled each turn; used by
+        #   teacher.patience_end_of_day_vs_start_ratio
+        # - intervention_outcomes: per-intervention pre/post compliance deltas;
+        #   used by intervention.empathic_compliance_gain
+        # - first_suspicion_turns: turn at which each ADHD student first
+        #   entered the suspicion tracker (adhd_indicator_score >= 0.5);
+        #   used by teacher.first_suspicion_turn_median (more accurate than
+        #   identify_adhd fallback)
+        self._stream_patience_log: list[float] = []
+        self._stream_intervention_outcomes: list[dict] = []
+        self._stream_first_suspicion_turns: dict[str, int] = {}
+
         for turn in range(1, self.classroom.MAX_TURNS + 1):
             self.memory.advance_turn()
             self._stream_final_turn = turn
@@ -731,13 +744,52 @@ class OrchestratorV2:
                 self.teacher_emotions.daily_recovery()
 
             # 1. Teacher decides action
+            prev_suspicious_ids = set(self._stream_suspicious.keys())
             action = self._decide_action(
                 self._stream_obs, turn,
                 self._stream_identified, self._stream_suspicious,
             )
 
+            # 1b. Detect newly-suspicious students (first crossing of
+            # adhd_indicator_score >= 0.5 threshold) and record the turn.
+            new_suspicious = set(self._stream_suspicious.keys()) - prev_suspicious_ids
+            for sid in new_suspicious:
+                if sid not in self._stream_first_suspicion_turns:
+                    self._stream_first_suspicion_turns[sid] = turn
+
+            # 1c. Capture pre-intervention compliance for outcome tracking.
+            pre_intervention_compliance: float | None = None
+            pre_intervention_sid: str | None = None
+            if (
+                action.action_type == "individual_intervention"
+                and action.student_id
+                and action.strategy
+            ):
+                s_obj = self.classroom.get_student(action.student_id)
+                if s_obj is not None:
+                    pre_intervention_compliance = float(
+                        s_obj.state.get("compliance", 0.5)
+                    )
+                    pre_intervention_sid = action.student_id
+
             # 2. Execute in environment
             self._stream_obs, reward, done, info = self.classroom.step(action)
+
+            # 2b. Record intervention outcome (post-compliance now available).
+            if (
+                pre_intervention_sid is not None
+                and pre_intervention_compliance is not None
+            ):
+                s_obj = self.classroom.get_student(pre_intervention_sid)
+                if s_obj is not None:
+                    post_compliance = float(s_obj.state.get("compliance", 0.5))
+                    self._stream_intervention_outcomes.append({
+                        "turn": turn,
+                        "student_id": pre_intervention_sid,
+                        "strategy": action.strategy,
+                        "pre_compliance": pre_intervention_compliance,
+                        "post_compliance": post_compliance,
+                    })
 
             # 3. Update teacher memory and tracks
             self._update_memory(self._stream_obs, action, info, self._stream_tracks, turn)
@@ -781,6 +833,9 @@ class OrchestratorV2:
             self.teacher_emotions.update_after_turn(
                 self._stream_obs.class_mood, n_incidents
             )
+
+            # 7c. Sample teacher patience (post-update) for calibration metrics
+            self._stream_patience_log.append(float(self.teacher_emotions.patience))
 
             # 8. Build and yield turn event
             event = self._make_event(
@@ -1930,4 +1985,8 @@ class OrchestratorV2:
             "metrics": metrics,
             "events": events,
             "reports": reports,
+            # Calibration-oriented exports (§25.13 bridge data):
+            "teacher_patience_log": list(self._stream_patience_log),
+            "intervention_outcomes": list(self._stream_intervention_outcomes),
+            "first_suspicion_turns": dict(self._stream_first_suspicion_turns),
         }

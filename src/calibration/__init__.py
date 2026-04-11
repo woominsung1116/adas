@@ -37,6 +37,11 @@ from .loader import (
     default_harness_paths,
 )
 
+from .adapters import (
+    class_result_to_history,
+    run_real_bundle,
+)
+
 __all__ = [
     # loss
     "LossResult",
@@ -58,4 +63,7 @@ __all__ = [
     "load_epidemiology_targets",
     "load_targets",
     "default_harness_paths",
+    # adapters
+    "class_result_to_history",
+    "run_real_bundle",
 ]

@@ -74,6 +74,10 @@ class ClassHistory:
     reports: list = field(default_factory=list)
     teacher_patience_log: list[float] | None = None
     intervention_outcomes: list[dict] = field(default_factory=list)
+    # Map of {student_id: first-suspicion turn} from the orchestrator's
+    # suspicion tracker (adhd_indicator_score >= 0.5 crossing). Preferred
+    # input for teacher.first_suspicion_turn_median when present.
+    first_suspicion_turns: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -375,12 +379,16 @@ def _behavior_seat_leaving_ratio(bundle: CalibrationResultBundle) -> float:
 
 
 def _teacher_first_suspicion_turn_median(bundle: CalibrationResultBundle) -> float:
-    """Median turn at which teacher first flagged any ADHD student per class.
+    """Median turn at which teacher first began suspecting any ADHD student.
 
-    APPROXIMATION: we use `identify_adhd` action as a proxy for "first
-    suspicion" because the current orchestrator does not emit a separate
-    suspicion event. True suspicion may occur earlier during observation
-    passes. This is documented as a known approximation.
+    Prefers the real suspicion signal (orchestrator's `first_suspicion_turns`
+    map, populated when a student first crosses the adhd_indicator_score
+    suspicion threshold). Falls back to `identify_adhd` action timing for
+    histories that lack suspicion data (e.g., legacy or synthetic bundles).
+
+    "First suspicion" is taken per-class as the earliest turn at which any
+    true-ADHD student entered suspicion. The median across classes is
+    returned.
     """
     first_turns: list[int] = []
     for h in bundle.histories:
@@ -390,19 +398,34 @@ def _teacher_first_suspicion_turn_median(bundle: CalibrationResultBundle) -> flo
         }
         if not adhd_ids:
             continue
-        earliest_turn = None
-        for ev in h.events:
-            action = ev.get("teacher_action") or {}
-            if action.get("action_type") == "identify_adhd":
-                sid = action.get("student_id")
-                if sid in adhd_ids:
-                    earliest_turn = ev.get("turn", 0)
-                    break
+
+        # Preferred: real suspicion tracker data from orchestrator
+        earliest_turn: int | None = None
+        if h.first_suspicion_turns:
+            adhd_suspicion_turns = [
+                t for sid, t in h.first_suspicion_turns.items()
+                if sid in adhd_ids
+            ]
+            if adhd_suspicion_turns:
+                earliest_turn = min(adhd_suspicion_turns)
+
+        # Fallback: identify_adhd action as proxy (legacy synthetic bundles)
+        if earliest_turn is None:
+            for ev in h.events:
+                action = ev.get("teacher_action") or {}
+                if action.get("action_type") == "identify_adhd":
+                    sid = action.get("student_id")
+                    if sid in adhd_ids:
+                        earliest_turn = ev.get("turn", 0)
+                        break
+
         if earliest_turn is not None:
             first_turns.append(earliest_turn)
 
     if not first_turns:
-        raise ValueError("no identification events found in bundle")
+        raise ValueError(
+            "no suspicion or identification data found in bundle"
+        )
     return float(median(first_turns))
 
 
