@@ -339,6 +339,18 @@ except ImportError as e:
     ) from e
 
 try:
+    from src.simulation.teacher_observation import (
+        TeacherObservationBatch,
+        TeacherHypothesisBoard,
+        build_observations_from_classroom,
+    )
+except ImportError as e:
+    raise ImportError(
+        f"teacher_observation not found or broken: {e}. "
+        "Ensure src/simulation/teacher_observation.py exists."
+    ) from e
+
+try:
     from src.eval.identification_report import (
         IdentificationReport,
         IdentificationEvaluator,
@@ -646,6 +658,11 @@ class OrchestratorV2:
         self.teacher_emotions = TeacherEmotionalState()
         # Per-class hypothesis trackers, reset each class
         self._hypothesis_trackers: dict[str, HypothesisTracker] = {}
+        # Phase 6 slice 1: per-class teacher observation + hypothesis board.
+        # Reset inside stream_class; pre-initialized here so callers can
+        # access these attributes before the first class runs.
+        self.hypothesis_board: TeacherHypothesisBoard = TeacherHypothesisBoard()
+        self._current_teacher_obs: TeacherObservationBatch | None = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -740,6 +757,14 @@ class OrchestratorV2:
         self._stream_intervention_outcomes: list[dict] = []
         self._stream_first_suspicion_turns: dict[str, int] = {}
 
+        # Phase 6 slice 1: explicit teacher-facing partial observation
+        # and per-student working hypothesis state. Built alongside the
+        # existing decision path; future passes (hypothesis testing,
+        # delayed feedback, memory noise) will consume these objects
+        # instead of reading latent student state directly.
+        self.hypothesis_board = TeacherHypothesisBoard()
+        self._current_teacher_obs: TeacherObservationBatch | None = None
+
         for turn in range(1, self.classroom.MAX_TURNS + 1):
             self.memory.advance_turn()
             self._stream_final_turn = turn
@@ -750,6 +775,17 @@ class OrchestratorV2:
 
             # 1. Teacher decides action
             prev_suspicious_ids = set(self._stream_suspicious.keys())
+
+            # 1a. Phase 6 slice 1: project the raw ClassroomObservation
+            # into an explicit partial-observation batch and fold it into
+            # the teacher's hypothesis board BEFORE the decision path
+            # runs. The decision logic still reads the legacy obs path
+            # for now; the board runs in parallel so future passes can
+            # flip the decision path to consume only observables.
+            teacher_batch = build_observations_from_classroom(self._stream_obs)
+            self._current_teacher_obs = teacher_batch
+            self.hypothesis_board.record_batch(teacher_batch)
+
             action = self._decide_action(
                 self._stream_obs, turn,
                 self._stream_identified, self._stream_suspicious,
@@ -757,10 +793,29 @@ class OrchestratorV2:
 
             # 1b. Detect newly-suspicious students (first crossing of
             # adhd_indicator_score >= 0.5 threshold) and record the turn.
+            # This is now mirrored on the hypothesis board so that
+            # first_suspicion_turn flows through the explicit layer.
             new_suspicious = set(self._stream_suspicious.keys()) - prev_suspicious_ids
             for sid in new_suspicious:
                 if sid not in self._stream_first_suspicion_turns:
                     self._stream_first_suspicion_turns[sid] = turn
+                # Route the same event through the hypothesis board.
+                # threshold=0.0 means "any recorded suspicion counts
+                # as a first crossing" — matches the legacy
+                # set-difference semantics above.
+                tracker = self._hypothesis_trackers.get(sid)
+                label = (
+                    tracker.diagnosis_hypothesis
+                    if tracker and tracker.diagnosis_hypothesis
+                    else "unknown"
+                )
+                self.hypothesis_board.record_suspicion(
+                    sid,
+                    turn=turn,
+                    score=float(self._stream_suspicious[sid]),
+                    threshold=0.0,
+                    working_label=label,
+                )
 
             # 1c. Capture pre-intervention compliance for outcome tracking.
             pre_intervention_compliance: float | None = None
