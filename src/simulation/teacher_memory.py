@@ -188,6 +188,101 @@ class ObservationRecord:
 
 
 @dataclass
+class PendingObservationFeedback:
+    """A memory commit queued for a later turn (Phase 6 slice 3).
+
+    Before this slice, the orchestrator derived every observation's
+    outcome immediately on the same turn and committed the memory
+    record right away — the teacher was getting unrealistically
+    instantaneous feedback from their interventions. This dataclass
+    represents a commit that has been STAGED but not yet applied.
+
+    Fields intentionally avoid any latent student scalar: the only
+    cross-turn state we need later is the student id (to re-query
+    visible post-action signals), the observed behaviors that were
+    seen at action time, the action the teacher took, and the
+    two turn markers. Outcome derivation happens at dequeue time
+    through the orchestrator's existing observable-only
+    ``_derive_feedback_outcome`` helper.
+
+    Fields:
+      student_id:         who the observation is about
+      observed_behaviors: teacher-visible behavior strings at
+                          action time (already translated to the
+                          ALL_BEHAVIORS vocabulary)
+      teacher_action:     action_type the teacher took
+      observed_turn:      turn at which the observation was made
+                          (record.turn will be set from this)
+      due_turn:           turn at which the commit should actually
+                          happen (observed_turn + delay)
+    """
+
+    student_id: str
+    observed_behaviors: list[str]
+    teacher_action: str
+    observed_turn: int
+    due_turn: int
+
+    def as_dict(self) -> dict:
+        return {
+            "student_id": self.student_id,
+            "observed_behaviors": list(self.observed_behaviors),
+            "teacher_action": self.teacher_action,
+            "observed_turn": self.observed_turn,
+            "due_turn": self.due_turn,
+        }
+
+
+class FeedbackDelayQueue:
+    """Minimal FIFO queue for delayed-feedback memory commits.
+
+    Determinism:
+      * order-preserving: items are popped in the order they were
+        enqueued (stable sort by due_turn, then by enqueue index)
+      * ``pop_due(current_turn)`` returns all items whose
+        ``due_turn <= current_turn`` without touching the rest
+      * ``flush_all()`` returns everything still pending, for use
+        at class end so no observations silently disappear
+
+    No RNG, no hashing, no wall-clock reads — a later memory-noise
+    pass can wrap this queue but the queue itself is pure data.
+    """
+
+    def __init__(self) -> None:
+        self._items: list[PendingObservationFeedback] = []
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def enqueue(self, item: PendingObservationFeedback) -> None:
+        self._items.append(item)
+
+    def peek_all(self) -> list[PendingObservationFeedback]:
+        return list(self._items)
+
+    def pop_due(self, current_turn: int) -> list[PendingObservationFeedback]:
+        """Return and remove every item whose ``due_turn <= current_turn``.
+
+        The remaining items keep their original relative order.
+        """
+        due: list[PendingObservationFeedback] = []
+        rest: list[PendingObservationFeedback] = []
+        for item in self._items:
+            if item.due_turn <= current_turn:
+                due.append(item)
+            else:
+                rest.append(item)
+        self._items = rest
+        return due
+
+    def flush_all(self) -> list[PendingObservationFeedback]:
+        """Return and remove every pending item. Used at class end."""
+        out = self._items
+        self._items = []
+        return out
+
+
+@dataclass
 class Principle:
     """A single entry in the Experience Base."""
 
@@ -580,6 +675,40 @@ class TeacherMemory:
         )
         idx = self.case_base.add(record)
         # Track which class this record belongs to (for principle promotion)
+        class_id = getattr(self, "_current_class_id", self._metrics.classes_seen)
+        while len(self._record_class_ids) <= idx:
+            self._record_class_ids.append(class_id)
+        return idx
+
+    def append_record(
+        self,
+        student_id: str,
+        turn: int,
+        observed_behaviors: list[str],
+        feedback: "ObservationOutcome",
+    ) -> int:
+        """Commit an observation directly, bypassing the pending buffer.
+
+        Phase 6 slice 3 hook for the delayed-feedback queue. Unlike
+        ``commit_observation``, this helper does NOT read from
+        ``_pending_behaviors`` / ``_pending_action`` — it takes all
+        record fields as explicit arguments. That matters because a
+        delayed commit may happen several turns after the original
+        observation, by which time subsequent same-turn observations
+        have overwritten the pending buffer for this student.
+
+        No latent state is stored: the record carries only the
+        explicit teacher-visible arguments and the feedback payload.
+        """
+        record = ObservationRecord(
+            student_id=student_id,
+            turn=turn,
+            observed_behaviors=list(observed_behaviors),
+            action_taken=feedback.teacher_action,
+            outcome=feedback.outcome,
+            feedback=feedback,
+        )
+        idx = self.case_base.add(record)
         class_id = getattr(self, "_current_class_id", self._metrics.classes_seen)
         while len(self._record_class_ids) <= idx:
             self._record_class_ids.append(class_id)

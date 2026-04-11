@@ -321,6 +321,8 @@ try:
     from src.simulation.teacher_memory import (
         TeacherMemory,
         ObservationOutcome,
+        PendingObservationFeedback,
+        FeedbackDelayQueue,
         HYPERACTIVITY_BEHAVIORS,
         IMPULSIVITY_BEHAVIORS,
         INATTENTION_BEHAVIORS,
@@ -678,6 +680,7 @@ class OrchestratorV2:
         seed: int | None = None,
         phase_config: PhaseConfig | None = None,
         feedback_rate: float = 0.30,
+        feedback_delay_turns: int = 1,
     ):
         self.log = InteractionLog()
         self.classroom = ClassroomV2(
@@ -703,6 +706,15 @@ class OrchestratorV2:
         self.teacher_emotions = TeacherEmotionalState()
         # Per-class hypothesis trackers, reset each class
         self._hypothesis_trackers: dict[str, HypothesisTracker] = {}
+
+        # Phase 6 slice 3: delayed feedback for memory commits.
+        # Observations are staged each turn and committed to teacher
+        # memory `feedback_delay_turns` turns later, through the
+        # same observable-only derivation path. Fixed integer delay
+        # keeps the simulator deterministic; stochastic delay is
+        # deferred to a later pass.
+        self.feedback_delay_turns: int = max(0, int(feedback_delay_turns))
+        self._feedback_queue: FeedbackDelayQueue = FeedbackDelayQueue()
         # Phase 6 slice 1: per-class teacher observation + hypothesis board.
         # Reset inside stream_class; pre-initialized here so callers can
         # access these attributes before the first class runs.
@@ -816,6 +828,11 @@ class OrchestratorV2:
         self.hypothesis_board = TeacherHypothesisBoard()
         self._current_teacher_obs: TeacherObservationBatch | None = None
 
+        # Phase 6 slice 3: reset the delayed-feedback queue per class
+        # so stale cross-class pending items do not bleed into a
+        # fresh run. Each class starts with an empty queue.
+        self._feedback_queue = FeedbackDelayQueue()
+
         for turn in range(1, self.classroom.MAX_TURNS + 1):
             self.memory.advance_turn()
             self._stream_final_turn = turn
@@ -823,6 +840,16 @@ class OrchestratorV2:
             # Teacher daily recovery (at start of each day, period 1)
             if turn % 5 == 1:
                 self.teacher_emotions.daily_recovery()
+
+            # 0. Phase 6 slice 3: drain the delayed-feedback queue
+            # BEFORE the teacher decides. This simulates the teacher
+            # "noticing yesterday's result" first — any pending
+            # observation whose due_turn has arrived is now derived
+            # through the observable-only feedback path and
+            # committed to the case base, so the next decision is
+            # informed by matured memory rather than instantaneous
+            # reinforcement.
+            self._drain_feedback_queue(current_turn=turn)
 
             # 1. Teacher decides action
             prev_suspicious_ids = set(self._stream_suspicious.keys())
@@ -957,6 +984,14 @@ class OrchestratorV2:
 
             if done:
                 break
+
+        # Phase 6 slice 3: flush any pending delayed-feedback items
+        # that were staged on the final turns. Without this, tail-end
+        # observations (staged on turns >= MAX_TURNS - delay) would
+        # never reach memory because no subsequent turn runs a drain
+        # step. Matters for small unit-test classes where MAX_TURNS
+        # is tiny; harmless in 950-turn runs.
+        self._flush_feedback_queue()
 
         # Final: compile and yield class_complete
         result = self._compile_class_result(
@@ -1864,6 +1899,54 @@ class OrchestratorV2:
     # Memory update
     # ------------------------------------------------------------------
 
+    def _drain_feedback_queue(self, current_turn: int) -> int:
+        """Commit every pending memory observation whose delay has matured.
+
+        Phase 6 slice 3. Called once at the start of each turn, and
+        once more at class end (via ``_flush_feedback_queue``) so
+        tail-end observations still land in memory. Returns the
+        number of items committed for observability in tests.
+
+        For each due pending item, re-derive an ``ObservationOutcome``
+        through the observable-only feedback path and push it onto
+        the case base via ``memory.append_record``. This is the only
+        place where queued pending items convert into real records.
+        """
+        due = self._feedback_queue.pop_due(current_turn)
+        for pending in due:
+            feedback = self._derive_feedback_outcome(
+                student_id=pending.student_id,
+                teacher_action=pending.teacher_action,
+            )
+            self.memory.append_record(
+                student_id=pending.student_id,
+                turn=pending.observed_turn,
+                observed_behaviors=pending.observed_behaviors,
+                feedback=feedback,
+            )
+        return len(due)
+
+    def _flush_feedback_queue(self) -> int:
+        """Commit every pending memory observation, regardless of due_turn.
+
+        Called once at class end so observations staged on the final
+        turns still reach memory. Uses the same observable-only
+        feedback path as ``_drain_feedback_queue``.
+        """
+        remaining = self._feedback_queue.flush_all()
+        for pending in remaining:
+            feedback = self._derive_feedback_outcome(
+                student_id=pending.student_id,
+                teacher_action=pending.teacher_action,
+            )
+            self.memory.append_record(
+                student_id=pending.student_id,
+                turn=pending.observed_turn,
+                observed_behaviors=pending.observed_behaviors,
+                feedback=feedback,
+            )
+        return len(remaining)
+
     def _derive_feedback_outcome(
         self,
         student_id: str,
@@ -1947,17 +2030,19 @@ class OrchestratorV2:
                     action.strategy, delta
                 )
 
-        # 1. Detailed observations first -- observe AND commit immediately.
+        # 1. Detailed observations first -- observe now, ENQUEUE
+        # the commit for the delayed-feedback queue.
         #
         # Phase 6 slice 2: the latent-state dump from the detailed
         # observation block is deliberately NOT passed into teacher
-        # memory. The ObservationOutcome feedback payload is the
-        # only path by which outcome signal enters memory, and it
-        # is derived from the post-action compliance by the
-        # orchestrator's feedback-translation step below. This
-        # keeps latent scalars out of the case base while
-        # preserving the same outcome labels the calibration stack
-        # was tuned against.
+        # memory.
+        #
+        # Phase 6 slice 3: the ObservationOutcome is no longer
+        # derived and committed on the same turn. Instead the
+        # observation is enqueued on `self._feedback_queue` with a
+        # `due_turn = turn + self.feedback_delay_turns`, and the
+        # turn-start drain step calls `_derive_feedback_outcome`
+        # + `memory.append_record` when the item matures.
         for detail in obs.detailed_observations:
             sid = detail.student_id
             behaviors = detail.behaviors
@@ -1971,26 +2056,25 @@ class OrchestratorV2:
                 if action.student_id == sid and action.strategy:
                     track.strategies_applied.append(action.strategy)
 
+            translated = _translate_behaviors(behaviors)
             self.memory.observe(
                 student_id=sid,
-                behaviors=_translate_behaviors(behaviors),
+                behaviors=translated,
                 # state explicitly dropped — Phase 6 slice 2 boundary
                 action_taken=action.action_type,
             )
-
-            # Derive the teacher-visible outcome LABEL from the
-            # student's post-action compliance. The raw scalar is
-            # used transiently by this feedback-translation step
-            # only — it is NOT stored in memory. What enters memory
-            # is the coarse label wrapped in an ObservationOutcome.
-            feedback = self._derive_feedback_outcome(
-                student_id=sid,
-                teacher_action=action.action_type,
+            self._feedback_queue.enqueue(
+                PendingObservationFeedback(
+                    student_id=sid,
+                    observed_behaviors=list(translated),
+                    teacher_action=action.action_type,
+                    observed_turn=turn,
+                    due_turn=turn + self.feedback_delay_turns,
+                )
             )
-            self.memory.commit_observation(sid, outcome=feedback)
             committed_this_turn.add(sid)
 
-        # 2. Student summaries -- skip students already committed this turn
+        # 2. Student summaries -- skip students already handled this turn
         for summary in obs.student_summaries:
             sid = summary.student_id
             if sid in committed_this_turn:
@@ -2006,17 +2090,22 @@ class OrchestratorV2:
 
             # Only feed to memory if this student has visible disruptive behaviors
             if behaviors and any(b not in ("on_task", "listening", "writing") for b in behaviors):
+                translated = _translate_behaviors(behaviors)
                 self.memory.observe(
                     student_id=sid,
-                    behaviors=_translate_behaviors(behaviors),
+                    behaviors=translated,
                     # state explicitly dropped — Phase 6 slice 2 boundary
                     action_taken="passive_observation",
                 )
-                feedback = self._derive_feedback_outcome(
-                    student_id=sid,
-                    teacher_action="passive_observation",
+                self._feedback_queue.enqueue(
+                    PendingObservationFeedback(
+                        student_id=sid,
+                        observed_behaviors=list(translated),
+                        teacher_action="passive_observation",
+                        observed_turn=turn,
+                        due_turn=turn + self.feedback_delay_turns,
+                    )
                 )
-                self.memory.commit_observation(sid, outcome=feedback)
                 committed_this_turn.add(sid)
 
     # ------------------------------------------------------------------

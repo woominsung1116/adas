@@ -94,6 +94,12 @@ def test_update_memory_preserves_focused_observation():
 
     orch.memory.advance_turn()
     orch._update_memory(obs, action, info, tracks, turn=1)
+    # Phase 6 slice 3: _update_memory now only ENQUEUES commits on
+    # the delayed-feedback queue. In a real run the next turn's
+    # drain step materializes them; in this single-call unit test
+    # we flush explicitly so the assertion reflects the eventual
+    # matured state, not the mid-flight staging state.
+    orch._flush_feedback_queue()
 
     # Check that the focused student's observation was committed
     # by verifying case_base has a record for this student
