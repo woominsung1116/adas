@@ -427,6 +427,105 @@ class AutoresearchOrchestrator:
             return None
 
     # ------------------------------------------------------------------
+    # Phase 6 slice 14: checkpoint-resume reconstruction of noise configs
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _restore_retrieval_noise_from_checkpoint(blob: Any) -> Any:
+        """Reconstruct a ``RetrievalNoiseConfig`` from a checkpoint dict.
+
+        Returns ``None`` when the blob is missing, ``null`` in JSON,
+        or does not look like a retrieval-noise payload. Never raises.
+        Import is local so this module stays decoupled from
+        ``teacher_memory`` import cycles.
+        """
+        if not isinstance(blob, dict):
+            return None
+        try:
+            from src.simulation.teacher_memory import RetrievalNoiseConfig
+        except Exception:
+            return None
+        dropout = blob.get("dropout_prob", 0.0)
+        jitter = blob.get("similarity_jitter", 0.0)
+        try:
+            return RetrievalNoiseConfig(
+                dropout_prob=float(dropout),
+                similarity_jitter=float(jitter),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _restore_teacher_noise_from_checkpoint(blob: Any) -> Any:
+        """Reconstruct a ``TeacherNoiseConfig`` from a checkpoint dict.
+
+        Same contract as ``_restore_retrieval_noise_from_checkpoint``.
+        """
+        if not isinstance(blob, dict):
+            return None
+        try:
+            from src.simulation.teacher_noise import TeacherNoiseConfig
+        except Exception:
+            return None
+        dropout = blob.get("observation_dropout_prob", 0.0)
+        confusion = blob.get("observation_confusion_prob", 0.0)
+        try:
+            return TeacherNoiseConfig(
+                observation_dropout_prob=float(dropout),
+                observation_confusion_prob=float(confusion),
+            )
+        except Exception:
+            return None
+
+    def _apply_resumed_noise_configs(self, ckpt: dict) -> None:
+        """Phase 6 slice 14: resume-time precedence rule.
+
+        When a checkpoint carries saved noise configs and the
+        evaluator on this orchestrator was constructed WITHOUT an
+        explicit config (``None``), adopt the checkpoint's value so
+        resumed runs continue with the same imperfect-recall /
+        perception policy they were scored under originally.
+
+        Precedence (explicit, documented, tested):
+          1. Explicit constructor-supplied config on the evaluator
+             WINS over the checkpoint.
+          2. When the evaluator has ``None`` and the checkpoint has
+             a non-null blob, the blob is reconstructed and
+             assigned onto the evaluator.
+          3. When both are absent, nothing changes.
+
+        The reconstruction is tolerant: missing / malformed blobs
+        fall through to ``None`` without raising, so a corrupted
+        checkpoint cannot break resume.
+        """
+        if self.evaluator is None:
+            return
+
+        # retrieval noise
+        ev_retrieval = getattr(self.evaluator, "retrieval_noise_config", None)
+        if ev_retrieval is None:
+            restored = self._restore_retrieval_noise_from_checkpoint(
+                ckpt.get("retrieval_noise_config")
+            )
+            if restored is not None:
+                try:
+                    self.evaluator.retrieval_noise_config = restored
+                except Exception:
+                    pass
+
+        # teacher perception noise
+        ev_teacher = getattr(self.evaluator, "teacher_noise_config", None)
+        if ev_teacher is None:
+            restored = self._restore_teacher_noise_from_checkpoint(
+                ckpt.get("teacher_noise_config")
+            )
+            if restored is not None:
+                try:
+                    self.evaluator.teacher_noise_config = restored
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
@@ -581,6 +680,12 @@ class AutoresearchOrchestrator:
                     except Exception:
                         # Skip malformed entries rather than crashing resume
                         continue
+
+                # Phase 6 slice 14: apply resume-time precedence for
+                # noise configs. Explicit constructor-supplied configs
+                # win; otherwise adopt from the checkpoint so the
+                # resumed run continues with the same noise policy.
+                self._apply_resumed_noise_configs(ckpt)
 
         for start_id in range(start_from, self.n_starts):
             start_seed = (self.seed or 0) + start_id * 1000
