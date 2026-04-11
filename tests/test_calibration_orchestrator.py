@@ -332,7 +332,12 @@ def test_orchestrator_checkpoint_roundtrip(tmp_path):
     assert loaded["completed_runs"] == 2
 
 
-def test_orchestrator_resume_skips_completed(tmp_path):
+def test_orchestrator_resume_skips_completed_and_restores_history(tmp_path):
+    """After resume with n_starts equal to completed_runs:
+      - no new starts are executed
+      - prior run states are reconstructed into result.runs (summary-only)
+      - global best metadata is restored
+    """
     space = SearchSpace([
         ParameterSpec("adhd_inattentive.emotional.frustration", 0.12, 0.25, default=0.19),
     ])
@@ -348,7 +353,8 @@ def test_orchestrator_resume_skips_completed(tmp_path):
     )
     orch.run()
 
-    # Resume: should pick up the global best from checkpoint
+    # Resume: should pick up the global best from checkpoint AND rehydrate
+    # the prior RunStates (as summary-only reconstructions).
     orch2 = AutoresearchOrchestrator(
         space=space,
         evaluator=ev,
@@ -359,8 +365,10 @@ def test_orchestrator_resume_skips_completed(tmp_path):
         results_dir=tmp_path,
     )
     result = orch2.run(resume=True)
-    # completed_runs was 2, n_starts is 2 → no new runs
-    assert len(result.runs) == 0
+    # completed_runs was 2, n_starts is 2 → no new runs, but the 2 old
+    # runs are reconstructed into result.runs
+    assert len(result.runs) == 2
+    assert all(r.restored_from_checkpoint for r in result.runs)
     assert result.global_best_loss < float("inf")
 
 
@@ -404,3 +412,247 @@ def test_prior_predictive_smoke():
     for name, v in report.per_target.items():
         assert "in_range" in v
         assert "range" in v
+
+
+# ==========================================================================
+# Regression — invalid override must not equal baseline
+# ==========================================================================
+
+
+def test_invalid_override_raises_parameter_override_error():
+    """Evaluator must raise ParameterOverrideError for unapplicable config.
+
+    Previous behavior silently treated bad configs as baseline, contaminating
+    search history with meaningless trials.
+    """
+    from src.calibration import ParameterOverrideError
+
+    ev = _make_small_evaluator()
+    with pytest.raises(ParameterOverrideError) as exc_info:
+        ev.evaluate({"unknown.section.definitely_not_real": 0.1})
+    # Error carries offending config + error list
+    assert exc_info.value.errors
+    assert "unknown.section.definitely_not_real" in exc_info.value.config
+
+
+def test_invalid_override_not_equal_baseline():
+    """Explicit regression: baseline loss != invalid-config loss.
+
+    Under the old code path they would coincide because apply errors were
+    silently swallowed. Now the invalid path must raise before running the
+    simulator, so the orchestrator records a penalized trial.
+    """
+    from src.calibration import ParameterOverrideError
+
+    ev = _make_small_evaluator()
+    _, baseline_loss = ev.evaluate({})  # empty override = baseline
+
+    with pytest.raises(ParameterOverrideError):
+        ev.evaluate({"bogus.cognitive.att_bandwidth": 2})
+    # Prove that *had* they been silently accepted, the baseline path was
+    # the only way to reach this loss; now the invalid path explicitly
+    # diverges via an exception.
+    assert baseline_loss.total >= 0.0
+
+
+def test_orchestrator_records_invalid_trials_with_penalty(tmp_path):
+    """Orchestrator must convert ParameterOverrideError into a penalized
+    trial — not crash, not silently use baseline loss.
+    """
+    from src.calibration.orchestrator import INVALID_CONFIG_PENALTY
+
+    space = SearchSpace([
+        # All values in this space will be routed to a profile that does NOT
+        # exist, forcing every evaluator call to hit the invalid path.
+        ParameterSpec(
+            "nonexistent_profile.emotional.frustration",
+            0.0,
+            1.0,
+            default=0.2,
+        ),
+    ])
+    ev = _make_small_evaluator()
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=2,
+        n_starts=1,
+        seed=7,
+        results_dir=tmp_path,
+    )
+    result = orch.run()
+    assert len(result.runs) == 1
+    run = result.runs[0]
+    assert run.iterations == 2
+    # Every trial should have been penalized (not baseline loss)
+    for trial in run.history:
+        assert trial.loss == INVALID_CONFIG_PENALTY
+        # Metadata preserves the error info for debugging
+        assert trial.metadata.get("error_type") == "parameter_override"
+        assert "errors" in trial.metadata
+        assert "offending_config" in trial.metadata
+    # Best loss should also equal penalty (no valid trials existed)
+    assert run.best_loss == INVALID_CONFIG_PENALTY
+
+
+def test_orchestrator_survives_mix_of_valid_and_invalid(tmp_path):
+    """When some configs are valid and some invalid, the loop still
+    completes and records both kinds of trials."""
+    from src.calibration import ParameterOverrideError
+    from src.calibration.orchestrator import INVALID_CONFIG_PENALTY, EvaluatorProtocol
+    from src.calibration.loss import LossResult
+
+    # Custom evaluator that raises on odd iteration, returns 0.5 on even
+    class ToggleEvaluator(EvaluatorProtocol):
+        def __init__(self):
+            self._count = 0
+
+        def evaluate(self, config):
+            self._count += 1
+            if self._count % 2 == 1:
+                raise ParameterOverrideError(
+                    ["simulated error"], config
+                )
+            return (None, LossResult(total=0.5))
+
+    space = SearchSpace([
+        ParameterSpec("adhd_inattentive.emotional.frustration", 0.12, 0.25, default=0.19),
+    ])
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ToggleEvaluator(),
+        proposer_kind="random",
+        n_iterations=4,
+        n_starts=1,
+        seed=9,
+        results_dir=tmp_path,
+    )
+    result = orch.run()
+    run = result.runs[0]
+    assert run.iterations == 4
+    # 2 penalized, 2 valid
+    losses = sorted(t.loss for t in run.history)
+    assert losses.count(0.5) == 2
+    assert losses.count(INVALID_CONFIG_PENALTY) == 2
+    # Best is 0.5
+    assert run.best_loss == 0.5
+
+
+# ==========================================================================
+# Regression — resume reconstructs prior run states
+# ==========================================================================
+
+
+def test_resume_reconstructs_prior_runs_and_appends_new(tmp_path):
+    """Resume with larger n_starts:
+      - first run: 2 starts → 2 completed
+      - second run: resume with n_starts=4 → 2 restored + 2 new = 4 total
+    """
+    space = SearchSpace([
+        ParameterSpec(
+            "adhd_inattentive.emotional.frustration", 0.12, 0.25, default=0.19
+        ),
+    ])
+    ev = _make_small_evaluator()
+
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=1,
+        n_starts=2,
+        seed=42,
+        results_dir=tmp_path,
+    )
+    first_result = orch.run()
+    assert len(first_result.runs) == 2
+
+    orch2 = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=1,
+        n_starts=4,  # larger
+        seed=42,
+        results_dir=tmp_path,
+    )
+    second_result = orch2.run(resume=True)
+
+    assert len(second_result.runs) == 4
+    # First 2 should be restored from checkpoint
+    restored = [r for r in second_result.runs if r.restored_from_checkpoint]
+    fresh = [r for r in second_result.runs if not r.restored_from_checkpoint]
+    assert len(restored) == 2
+    assert len(fresh) == 2
+    # Fresh runs have start_ids 2 and 3
+    fresh_ids = sorted(r.start_id for r in fresh)
+    assert fresh_ids == [2, 3]
+    # Global best should still be tracked (either from restored or new runs)
+    assert second_result.global_best_loss < float("inf")
+    # Summary string marks restored runs
+    summary = second_result.summary()
+    assert "[restored]" in summary
+
+
+def test_run_state_from_dict_roundtrip():
+    """RunState.to_dict() + from_dict() preserves summary fields."""
+    from src.calibration.orchestrator import RunState
+
+    original = RunState(
+        start_id=5,
+        seed=1234,
+        iterations=10,
+        best_loss=0.123456,
+        best_config={"x": 0.5, "y": 0.3},
+        elapsed_seconds=12.34,
+    )
+    payload = original.to_dict()
+    restored = RunState.from_dict(payload)
+
+    assert restored.start_id == 5
+    assert restored.seed == 1234
+    assert restored.iterations == 10
+    assert abs(restored.best_loss - 0.123456) < 1e-9
+    assert restored.best_config == {"x": 0.5, "y": 0.3}
+    assert abs(restored.elapsed_seconds - 12.34) < 1e-9
+    # history is intentionally empty after reconstruction
+    assert restored.history == []
+    assert restored.restored_from_checkpoint is True
+
+
+def test_resume_restored_runs_have_empty_history(tmp_path):
+    """Restored runs should have empty history (documented limitation)."""
+    space = SearchSpace([
+        ParameterSpec(
+            "adhd_inattentive.emotional.frustration", 0.12, 0.25, default=0.19
+        ),
+    ])
+    ev = _make_small_evaluator()
+
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=2,
+        n_starts=1,
+        seed=1,
+        results_dir=tmp_path,
+    )
+    orch.run()
+
+    orch2 = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=2,
+        n_starts=1,
+        seed=1,
+        results_dir=tmp_path,
+    )
+    result = orch2.run(resume=True)
+
+    assert len(result.runs) == 1
+    assert result.runs[0].restored_from_checkpoint
+    # Per-trial detail is NOT in the JSON checkpoint; it lives in results.tsv
+    assert result.runs[0].history == []

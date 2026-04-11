@@ -72,6 +72,7 @@ from .applier import (
     parameter_override,
     DefaultEvaluator,
     build_default_evaluator,
+    ParameterOverrideError,
 )
 
 __all__ = [
@@ -122,4 +123,5 @@ __all__ = [
     "parameter_override",
     "DefaultEvaluator",
     "build_default_evaluator",
+    "ParameterOverrideError",
 ]

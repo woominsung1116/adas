@@ -19,18 +19,46 @@ Key properties:
   - Thread-unsafe by design (module-level mutation); run sequentially
   - Dotted keys route to the right delta table entry
 
+Invalid/unapplied overrides are surfaced as `ParameterOverrideError`, never
+silently treated as baseline evaluations. The orchestrator converts such
+errors into penalized trials so bad configs cannot contaminate search
+history with false "baseline-equivalent" losses.
+
 This module is the glue between `proposer.py` and the real simulator.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .loss import LossResult, compute_combined_loss
 from .metrics import CalibrationResultBundle
 from .orchestrator import EvaluatorProtocol
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class ParameterOverrideError(Exception):
+    """Raised when a config has one or more non-applicable entries.
+
+    Carries the offending config and a list of per-key error messages so the
+    orchestrator can log the failure explicitly rather than treating the
+    trial as a valid baseline evaluation.
+    """
+
+    def __init__(self, errors: list[str], config: dict[str, Any]) -> None:
+        self.errors = list(errors)
+        self.config = dict(config)
+        details = "; ".join(errors) if errors else "unknown error"
+        super().__init__(
+            f"parameter override rejected {len(errors)} entr"
+            f"{'y' if len(errors) == 1 else 'ies'}: {details}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +233,24 @@ class DefaultEvaluator(EvaluatorProtocol):
     n_students: int = 20
 
     def evaluate(self, config: dict[str, Any]) -> tuple[Any, LossResult]:
+        """Apply config, run N classes, compute combined loss.
+
+        Raises ParameterOverrideError if any config entry cannot be applied.
+        The orchestrator catches this and records a penalized trial so bad
+        configs do not silently masquerade as valid baseline evaluations.
+        """
         from src.simulation.orchestrator_v2 import OrchestratorV2
         from .adapters import run_real_bundle
 
         bundle = CalibrationResultBundle(histories=[])
         with parameter_override(config) as apply_errors:
-            # Ignore apply errors for now; the proposer will steer away from
-            # bad regions via high loss. The errors are still useful for logs.
+            # Fail loudly: a config we cannot apply must NOT produce the same
+            # loss as an empty (baseline) config. That would contaminate the
+            # search history with meaningless trials. Raise so run_single_start
+            # can convert this into an explicit penalized trial.
+            if apply_errors:
+                raise ParameterOverrideError(apply_errors, config)
+
             for class_idx in range(self.n_classes):
                 class_seed = (
                     (self.seed + class_idx) if self.seed is not None else None
