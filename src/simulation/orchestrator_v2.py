@@ -343,6 +343,7 @@ try:
         TeacherObservationBatch,
         TeacherHypothesisBoard,
         build_observations_from_classroom,
+        canonicalize_hypothesis_label,
     )
 except ImportError as e:
     raise ImportError(
@@ -589,6 +590,35 @@ class HypothesisTracker:
 
 
 # ---------------------------------------------------------------------------
+# Observable-behavior proxies for strategy selection
+# ---------------------------------------------------------------------------
+
+#: High-visibility disruptive behaviors the teacher can see from the
+#: front of the room. Mirrors ``ClassroomV2._visible_behaviors`` so
+#: the decision path and the visibility filter stay in sync. Used by
+#: Phase 5 relapse detection and by ``_default_strategy``.
+_DISRUPTIVE_VISIBLE_BEHAVIORS: frozenset[str] = frozenset({
+    "out_of_seat",
+    "calling_out",
+    "interrupting",
+    "excessive_talking",
+    "running_in_classroom",
+    "fidgeting",
+    "emotional_outburst",
+})
+
+#: Behaviors that signal an attention breakdown the teacher can see
+#: (low-arousal inattention rather than high-arousal disruption).
+_INATTENTIVE_VISIBLE_BEHAVIORS: frozenset[str] = frozenset({
+    "seems_inattentive",
+    "staring_out_window",
+    "daydreaming",
+    "off_task",
+    "off-task",
+})
+
+
+# ---------------------------------------------------------------------------
 # Intervention strategy pool
 # ---------------------------------------------------------------------------
 
@@ -777,11 +807,9 @@ class OrchestratorV2:
             prev_suspicious_ids = set(self._stream_suspicious.keys())
 
             # 1a. Phase 6 slice 1: project the raw ClassroomObservation
-            # into an explicit partial-observation batch and fold it into
-            # the teacher's hypothesis board BEFORE the decision path
-            # runs. The decision logic still reads the legacy obs path
-            # for now; the board runs in parallel so future passes can
-            # flip the decision path to consume only observables.
+            # into an explicit partial-observation batch. The teacher
+            # decision path and hypothesis board BOTH consume this
+            # batch instead of reading latent student state.
             teacher_batch = build_observations_from_classroom(self._stream_obs)
             self._current_teacher_obs = teacher_batch
             self.hypothesis_board.record_batch(teacher_batch)
@@ -789,33 +817,17 @@ class OrchestratorV2:
             action = self._decide_action(
                 self._stream_obs, turn,
                 self._stream_identified, self._stream_suspicious,
+                teacher_batch=teacher_batch,
             )
 
-            # 1b. Detect newly-suspicious students (first crossing of
-            # adhd_indicator_score >= 0.5 threshold) and record the turn.
-            # This is now mirrored on the hypothesis board so that
-            # first_suspicion_turn flows through the explicit layer.
+            # 1b. Detect newly-suspicious students and keep the legacy
+            # first-suspicion dict in sync with the hypothesis board.
+            # The board is authoritative; the legacy dict is kept only
+            # so downstream metric code that reads it keeps working.
             new_suspicious = set(self._stream_suspicious.keys()) - prev_suspicious_ids
             for sid in new_suspicious:
                 if sid not in self._stream_first_suspicion_turns:
                     self._stream_first_suspicion_turns[sid] = turn
-                # Route the same event through the hypothesis board.
-                # threshold=0.0 means "any recorded suspicion counts
-                # as a first crossing" — matches the legacy
-                # set-difference semantics above.
-                tracker = self._hypothesis_trackers.get(sid)
-                label = (
-                    tracker.diagnosis_hypothesis
-                    if tracker and tracker.diagnosis_hypothesis
-                    else "unknown"
-                )
-                self.hypothesis_board.record_suspicion(
-                    sid,
-                    turn=turn,
-                    score=float(self._stream_suspicious[sid]),
-                    threshold=0.0,
-                    working_label=label,
-                )
 
             # 1c. Capture pre-intervention compliance for outcome tracking.
             pre_intervention_compliance: float | None = None
@@ -853,6 +865,15 @@ class OrchestratorV2:
 
             # 3. Update teacher memory and tracks
             self._update_memory(self._stream_obs, action, info, self._stream_tracks, turn)
+
+            # 3b. Synchronize the hypothesis board with the turn-end
+            # suspicion / diagnosis state. This runs every turn so the
+            # board reflects the *current* teacher-side hypothesis,
+            # not just the first moment a student entered the
+            # suspicious set. First-crossing semantics for
+            # ``first_suspicion_turn`` are preserved by
+            # ``record_suspicion`` (only sets once).
+            self._sync_hypothesis_board(turn)
 
             # 4. Handle identification actions
             if action.action_type == "identify_adhd" and action.student_id:
@@ -957,11 +978,65 @@ class OrchestratorV2:
         turn: int,
         identified: set[str],
         suspicious: dict[str, float],
+        *,
+        teacher_batch: TeacherObservationBatch | None = None,
     ) -> TeacherAction:
-        """Dispatch to LLM or rule-based teacher."""
+        """Dispatch to LLM or rule-based teacher.
+
+        ``teacher_batch`` is the Phase 6 slice 1 partial-observation
+        batch for this turn. If the caller does not supply one, the
+        method builds a batch from ``obs`` on the fly so legacy
+        callers / test harnesses still work. The rule-based and LLM
+        paths both consume the batch rather than reading latent
+        student state directly.
+        """
+        if teacher_batch is None:
+            teacher_batch = build_observations_from_classroom(obs)
         if self.teacher_llm:
-            return self._decide_action_llm(obs, turn)
-        return self._decide_action_rule_based(obs, turn, identified, suspicious)
+            return self._decide_action_llm(obs, turn, teacher_batch=teacher_batch)
+        return self._decide_action_rule_based(
+            obs, turn, identified, suspicious,
+            teacher_batch=teacher_batch,
+        )
+
+    def _sync_hypothesis_board(self, turn: int) -> None:
+        """Mirror the turn-end suspicion/hypothesis state onto the board.
+
+        Runs every turn (not only on first crossing) so the board
+        reflects the current teacher-side hypothesis, including:
+
+          * updated ``suspicion_score`` drawn from ``_stream_suspicious``
+          * updated ``working_label`` drawn from
+            ``_hypothesis_trackers[sid].diagnosis_hypothesis`` and
+            canonicalized via ``canonicalize_hypothesis_label`` so
+            legacy short forms (e.g. ``"adhd_hyperactive"``) do not
+            crash ``TeacherHypothesis.set_working_label``
+          * ``first_suspicion_turn`` preserved by the board — it is
+            only set on the first call where the score meets the
+            threshold (``0.0`` here, i.e. any recorded suspicion
+            counts as a first crossing, matching the legacy
+            set-difference semantics)
+
+        Students that have dropped out of ``_stream_suspicious`` keep
+        their last-recorded score; we do NOT silently zero them, so
+        the history trail stays honest.
+        """
+        trackers = self._hypothesis_trackers
+        for sid, score in self._stream_suspicious.items():
+            tracker = trackers.get(sid)
+            raw_label = (
+                tracker.diagnosis_hypothesis
+                if tracker and tracker.diagnosis_hypothesis
+                else "unknown"
+            )
+            canonical_label = canonicalize_hypothesis_label(raw_label)
+            self.hypothesis_board.record_suspicion(
+                sid,
+                turn=turn,
+                score=float(score),
+                threshold=0.0,
+                working_label=canonical_label,
+            )
 
     def _decide_action_rule_based(
         self,
@@ -969,6 +1044,8 @@ class OrchestratorV2:
         turn: int,
         identified: set[str],
         suspicious: dict[str, float],
+        *,
+        teacher_batch: TeacherObservationBatch | None = None,
     ) -> TeacherAction:
         """
         5-phase teacher strategy aligned with 950-turn timeline.
@@ -996,6 +1073,15 @@ class OrchestratorV2:
         _id_threshold_modifier = 1.0
         if self.teacher_emotions.is_burned_out():
             _id_threshold_modifier = 0.8  # lower threshold = more aggressive
+
+        # Phase 6 slice 1: build a per-student lookup of teacher-visible
+        # cues. Decision logic reads from this dict instead of touching
+        # student.state directly, enforcing the partial-observation
+        # boundary. Missing sids return an empty observation so
+        # downstream proxies degrade gracefully rather than raising.
+        if teacher_batch is None:
+            teacher_batch = build_observations_from_classroom(obs)
+        _obs_lookup = teacher_batch.by_student_id()
 
         # ---- Phase 1: Pure observation (turns 1..observation_end) ----
         if turn <= pc.observation_end:
@@ -1243,14 +1329,19 @@ class OrchestratorV2:
             # Prioritize identified-but-not-managed students
             for s in students:
                 if s.student_id in identified and not s.managed:
-                    # High distress -> private correction
-                    if s.state.get("distress_level", 0.0) >= 0.6:
+                    # Observable distress proxy: visible emotional outburst
+                    # replaces the latent ``distress_level >= 0.6`` check.
+                    observable = _obs_lookup.get(s.student_id)
+                    if (
+                        observable is not None
+                        and "emotional_outburst" in observable.visible_behaviors
+                    ):
                         return TeacherAction(
                             action_type="private_correction",
                             student_id=s.student_id,
-                            reasoning="Phase 4: high distress, private correction",
+                            reasoning="Phase 4: visible emotional outburst, private correction",
                         )
-                    strategy = self._choose_strategy(s)
+                    strategy = self._choose_strategy(s.student_id, observable)
                     return TeacherAction(
                         action_type="individual_intervention",
                         student_id=s.student_id,
@@ -1286,12 +1377,19 @@ class OrchestratorV2:
             )
 
         # ---- Phase 5: Maintenance + Relapse (turns care_end+1..950) ----
-        # Check managed students for relapse
+        # Observable relapse: a managed student re-exhibits any of the
+        # high-visibility disruptive behaviors the teacher can actually
+        # see. Replaces the latent ``compliance < MANAGED_COMPLIANCE``
+        # check. ``_DISRUPTIVE_VISIBLE_BEHAVIORS`` mirrors
+        # ``ClassroomV2._visible_behaviors`` high-vis set.
         for s in students:
             if s.student_id in identified and s.managed:
-                # Relapse detection: compliance dropped below threshold
-                if s.state.get("compliance", 0.8) < MANAGED_COMPLIANCE:
-                    strategy = self._choose_strategy(s)
+                observable = _obs_lookup.get(s.student_id)
+                if observable is not None and any(
+                    b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+                    for b in observable.visible_behaviors
+                ):
+                    strategy = self._choose_strategy(s.student_id, observable)
                     return TeacherAction(
                         action_type="individual_intervention",
                         student_id=s.student_id,
@@ -1302,7 +1400,8 @@ class OrchestratorV2:
         # Identified but not yet managed
         for s in students:
             if s.student_id in identified and not s.managed:
-                strategy = self._choose_strategy(s)
+                observable = _obs_lookup.get(s.student_id)
+                strategy = self._choose_strategy(s.student_id, observable)
                 return TeacherAction(
                     action_type="individual_intervention",
                     student_id=s.student_id,
@@ -1333,7 +1432,11 @@ class OrchestratorV2:
         )
 
     def _decide_action_llm(
-        self, obs: ClassroomObservation, turn: int
+        self,
+        obs: ClassroomObservation,
+        turn: int,
+        *,
+        teacher_batch: TeacherObservationBatch | None = None,
     ) -> TeacherAction:
         """Use LLM (Codex CLI) for teacher decision with full memory context.
 
@@ -1348,14 +1451,23 @@ class OrchestratorV2:
         Falls back to rule-based on any error.
         """
         try:
-            # 1. Build student observation summary
+            # 1. Build student observation summary from the Phase 6
+            # slice 1 partial-observation batch. The LLM prompt gets
+            # the same observable-only view the rule-based path uses
+            # (visible behaviors + profile hint + teacher-side
+            # identified/managed flags). Memory scores are
+            # derived from past observations, not latent state.
+            if teacher_batch is None:
+                teacher_batch = build_observations_from_classroom(obs)
             student_lines: list[str] = []
-            for summary in obs.student_summaries:
-                profile = self.memory.get_profile(summary.student_id)
+            for observation in teacher_batch:
+                profile = self.memory.get_profile(observation.student_id)
                 score = profile.adhd_indicator_score() if profile else 0.0
-                behaviors = summary.behaviors
                 student_lines.append(
-                    f"  {summary.student_id}: behaviors={behaviors}, score={score:.2f}"
+                    f"  {observation.student_id}: "
+                    f"behaviors={list(observation.visible_behaviors)}, "
+                    f"hint={observation.profile_hint}, "
+                    f"score={score:.2f}"
                 )
 
             # 2. Retrieve memory context for top suspicious students
@@ -1597,9 +1709,29 @@ class OrchestratorV2:
     # Helper: choose intervention strategy
     # ------------------------------------------------------------------
 
-    def _choose_strategy(self, student: Any) -> str:
-        """Pick best intervention strategy based on memory, state, and teacher emotions."""
-        profile = self.memory.get_profile(student.student_id)
+    def _choose_strategy(
+        self,
+        student_id: str,
+        observable: Any = None,
+    ) -> str:
+        """Pick best intervention strategy from teacher-visible signals.
+
+        Phase 6 slice 1: replaces the previous
+        ``_choose_strategy(student)`` signature that read latent
+        student state directly. The decision path now passes either
+        a ``StudentObservation`` or ``None`` and this routine only
+        consults:
+
+          * teacher memory (profile history, case base, experience base)
+          * teacher emotional state
+          * the supplied observation's ``visible_behaviors`` /
+            ``profile_hint`` — never the student's latent state
+
+        ``observable`` is typed as ``Any`` to avoid a forward import
+        cycle; at runtime it is a ``StudentObservation`` instance or
+        ``None`` when the caller has no turn-level observation yet.
+        """
+        profile = self.memory.get_profile(student_id)
         history = profile.response_to_interventions
 
         # Teacher emotional state biases strategy choice
@@ -1619,7 +1751,7 @@ class OrchestratorV2:
             )
             if dominant and has_labeled:
                 similar = self.memory.retrieve_similar_cases(
-                    dominant, top_k=5, exclude_student_id=student.student_id,
+                    dominant, top_k=5, exclude_student_id=student_id,
                 )
                 strategy_scores: dict[str, float] = {}
                 for sim, record in similar:
@@ -1643,27 +1775,54 @@ class OrchestratorV2:
             best = max(history, key=lambda k: history[k])
             return best
 
-        # Fall back to state-based heuristics
-        return self._default_strategy(student)
+        # Fall back to observation-derived heuristics
+        return self._default_strategy(observable)
 
-    def _default_strategy(self, student: Any) -> str:
-        """State-based fallback strategy selection."""
-        distress = student.state.get("distress_level", 0.5)
-        escalation = student.state.get("escalation_risk", 0.3)
-        attention = student.state.get("attention", 0.5)
+    def _default_strategy(self, observable: Any = None) -> str:
+        """Observable-only fallback strategy selection.
 
-        # Low empathy: misreads anxiety as defiance, uses firm_boundary
+        Consumes a ``StudentObservation`` (or None). Derives proxies
+        from visible behaviors and the coarse ``profile_hint`` label,
+        with no access to latent scalars. The previous version read
+        student state directly; this replacement uses only the
+        partial-observation layer.
+
+        Decision ladder:
+          1. visible ``emotional_outburst`` with a low-empathy
+             teacher → ``firm_boundary`` (legacy misread branch,
+             reproduced with observables)
+          2. visible ``emotional_outburst`` →
+             ``empathic_acknowledgment``
+          3. any disruptive visible behavior → ``break_offer``
+          4. any inattentive visible behavior OR
+             ``profile_hint == "inattentive"`` → ``redirect_attention``
+          5. nothing observable → random strategy
+        """
+        visible: tuple[str, ...] = tuple()
+        profile_hint: str = ""
+        if observable is not None:
+            visible = tuple(getattr(observable, "visible_behaviors", ()) or ())
+            profile_hint = str(getattr(observable, "profile_hint", "") or "")
+
+        has_outburst = "emotional_outburst" in visible
+        has_disruption = any(b in _DISRUPTIVE_VISIBLE_BEHAVIORS for b in visible)
+        has_inattention = any(
+            b in _INATTENTIVE_VISIBLE_BEHAVIORS for b in visible
+        ) or profile_hint == "inattentive"
+
+        # Low empathy: misreads visible outburst as defiance,
+        # escalates to firm_boundary.
         if (
-            distress >= 0.6
+            has_outburst
             and self.teacher_emotions.observation_accuracy() < 0.5
         ):
             return "firm_boundary"
 
-        if distress >= 0.6:
+        if has_outburst:
             return "empathic_acknowledgment"
-        if escalation >= 0.6:
+        if has_disruption:
             return "break_offer"
-        if attention < 0.3:
+        if has_inattention:
             return "redirect_attention"
 
         return self._rng.choice(STRATEGIES)

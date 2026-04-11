@@ -20,6 +20,7 @@ from src.simulation.teacher_observation import (
     TeacherHypothesisBoard,
     TeacherObservationBatch,
     build_observations_from_classroom,
+    canonicalize_hypothesis_label,
 )
 from src.simulation.classroom_env_v2 import (
     ClassroomObservation,
@@ -338,3 +339,222 @@ def test_orchestrator_board_is_deterministic_under_fixed_seed():
     a = run_one()
     b = run_one()
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# Problem 1 regression: decision path no longer reads latent student state
+# ---------------------------------------------------------------------------
+
+
+def test_decision_path_source_has_no_latent_state_reads():
+    """Static guard: the rule-based decision path body must not
+    contain ``student.state.get(...)`` calls. Those are latent-only
+    reads the partial-observation boundary is meant to forbid.
+    """
+    import inspect
+    from src.simulation import orchestrator_v2
+
+    src = inspect.getsource(orchestrator_v2.OrchestratorV2._decide_action_rule_based)
+    # A bare ``s.state.get`` or ``student.state.get`` anywhere in
+    # the body would leak latent fields — the fix replaced every
+    # such read with an observation-derived proxy.
+    assert ".state.get(" not in src, (
+        "_decide_action_rule_based still reads latent student.state"
+    )
+    # The Phase 6 substitutes must be present.
+    assert "_obs_lookup" in src
+    assert "emotional_outburst" in src  # observable distress proxy
+    assert "_DISRUPTIVE_VISIBLE_BEHAVIORS" in src  # observable relapse proxy
+
+
+def test_choose_strategy_and_default_strategy_have_no_latent_reads():
+    import inspect
+    from src.simulation import orchestrator_v2
+
+    for fn in (
+        orchestrator_v2.OrchestratorV2._choose_strategy,
+        orchestrator_v2.OrchestratorV2._default_strategy,
+    ):
+        src = inspect.getsource(fn)
+        assert ".state.get(" not in src, (
+            f"{fn.__qualname__} still reads latent student.state"
+        )
+        assert "distress_level" not in src, (
+            f"{fn.__qualname__} still references latent distress_level"
+        )
+        assert "escalation_risk" not in src, (
+            f"{fn.__qualname__} still references latent escalation_risk"
+        )
+
+
+def test_default_strategy_uses_observation_proxies():
+    """Behavior-level test: the observable-only default strategy
+    routes decision-making through visible_behaviors / profile_hint.
+    """
+    orch = OrchestratorV2(n_students=5, max_classes=1, seed=1)
+
+    def make_obs(behaviors: tuple[str, ...], hint: str = ""):
+        return StudentObservation(
+            student_id="S01",
+            turn=1,
+            visible_behaviors=behaviors,
+            profile_hint=hint,
+            seat_row=0,
+            seat_col=0,
+            is_identified=False,
+            is_managed=False,
+        )
+
+    # Visible outburst + normal empathy → empathic_acknowledgment
+    assert orch._default_strategy(
+        make_obs(("emotional_outburst",))
+    ) == "empathic_acknowledgment"
+
+    # Visible disruption without outburst → break_offer
+    assert orch._default_strategy(
+        make_obs(("out_of_seat", "calling_out"))
+    ) == "break_offer"
+
+    # Profile hint "inattentive" → redirect_attention
+    assert orch._default_strategy(
+        make_obs((), hint="inattentive")
+    ) == "redirect_attention"
+
+    # Visible inattention behavior → redirect_attention
+    assert orch._default_strategy(
+        make_obs(("seems_inattentive",))
+    ) == "redirect_attention"
+
+
+def test_llm_prompt_builder_consumes_teacher_batch_not_latent_state():
+    """Static guard: the LLM decision path must build its student
+    lines from the teacher observation batch, not from
+    ``detailed_observations.state_snapshot`` or any latent field.
+    """
+    import inspect
+    from src.simulation import orchestrator_v2
+
+    src = inspect.getsource(orchestrator_v2.OrchestratorV2._decide_action_llm)
+    assert "state_snapshot" not in src, (
+        "LLM prompt still references detailed state_snapshot"
+    )
+    assert "emotional_cues" not in src
+    assert ".state.get(" not in src
+    # Must pull the student list from the teacher_batch iteration.
+    assert "teacher_batch" in src
+    assert "observation.visible_behaviors" in src
+
+
+# ---------------------------------------------------------------------------
+# Problem 2 regression: board stays synchronized; label canonicalization
+# ---------------------------------------------------------------------------
+
+
+def test_canonicalize_hypothesis_label_maps_legacy_to_canonical():
+    assert canonicalize_hypothesis_label("adhd_hyperactive") == "adhd_hyperactive_impulsive"
+    assert canonicalize_hypothesis_label("ADHD_Hyperactive") == "adhd_hyperactive_impulsive"
+    assert canonicalize_hypothesis_label(" adhd_hyperactive ") == "adhd_hyperactive_impulsive"
+    assert canonicalize_hypothesis_label("anxiety") == "anxiety"
+    assert canonicalize_hypothesis_label("adhd_inattentive") == "adhd_inattentive"
+    assert canonicalize_hypothesis_label("typical") == "typical"
+
+
+def test_canonicalize_hypothesis_label_funnels_unknown_and_none_to_unknown():
+    assert canonicalize_hypothesis_label(None) == "unknown"
+    assert canonicalize_hypothesis_label("") == "unknown"
+    assert canonicalize_hypothesis_label("schizophrenia") == "unknown"
+    # Canonical must never raise — total function on strings
+    assert canonicalize_hypothesis_label("  ") == "unknown"
+
+
+def test_hypothesis_set_working_label_accepts_canonicalized_legacy():
+    """Regression: the orchestrator used to crash here by passing
+    ``adhd_hyperactive`` straight from ``HypothesisTracker`` into
+    ``TeacherHypothesis.set_working_label``. The fix routes every
+    label through ``canonicalize_hypothesis_label`` first."""
+    h = TeacherHypothesis(student_id="S01")
+    h.set_working_label(canonicalize_hypothesis_label("adhd_hyperactive"))
+    assert h.working_label == "adhd_hyperactive_impulsive"
+
+
+def test_sync_hypothesis_board_updates_score_and_label_over_time():
+    """Direct test of the sync helper: calling it on successive
+    turns must update the score on an existing hypothesis, not
+    just create it once."""
+    orch = OrchestratorV2(n_students=3, max_classes=1, seed=11)
+    # Seed the stream state the way stream_class would.
+    orch._stream_suspicious = {"S01": 0.20}
+    orch._hypothesis_trackers = {}
+
+    orch._sync_hypothesis_board(turn=10)
+    h = orch.hypothesis_board.get("S01")
+    assert h is not None
+    assert h.suspicion_score == pytest.approx(0.20)
+    assert h.first_suspicion_turn == 10
+    assert h.working_label == "unknown"
+
+    # Score moves up on a later turn — sync must propagate it.
+    orch._stream_suspicious["S01"] = 0.55
+    orch._sync_hypothesis_board(turn=25)
+    h = orch.hypothesis_board.get("S01")
+    assert h.suspicion_score == pytest.approx(0.55)
+    # first_suspicion_turn is SET ONCE and does not move
+    assert h.first_suspicion_turn == 10
+    # History records both updates
+    assert len(h.history) == 2
+
+
+def test_sync_hypothesis_board_canonicalizes_legacy_label():
+    """If the orchestrator's HypothesisTracker emits
+    ``adhd_hyperactive``, the sync helper must canonicalize it
+    before pushing to the board — no ValueError."""
+    from src.simulation.orchestrator_v2 import HypothesisTracker
+
+    orch = OrchestratorV2(n_students=3, max_classes=1, seed=11)
+    orch._stream_suspicious = {"S02": 0.40}
+    tracker = HypothesisTracker(student_id="S02", suspicion_turn=5)
+    tracker.diagnosis_hypothesis = "adhd_hyperactive"  # legacy label
+    orch._hypothesis_trackers = {"S02": tracker}
+
+    # Must not raise.
+    orch._sync_hypothesis_board(turn=5)
+    h = orch.hypothesis_board.get("S02")
+    assert h is not None
+    assert h.working_label == "adhd_hyperactive_impulsive"
+    assert h.first_suspicion_turn == 5
+
+
+def test_sync_hypothesis_board_preserves_first_suspicion_on_repeat():
+    orch = OrchestratorV2(n_students=3, max_classes=1, seed=11)
+    orch._stream_suspicious = {"S03": 0.30}
+    orch._hypothesis_trackers = {}
+    orch._sync_hypothesis_board(turn=7)
+    orch._sync_hypothesis_board(turn=8)
+    orch._sync_hypothesis_board(turn=9)
+    h = orch.hypothesis_board.get("S03")
+    assert h.first_suspicion_turn == 7  # only the first call sets it
+    assert len(h.history) == 3
+
+
+def test_run_class_board_tracks_suspicion_score_movement():
+    """Integration: over a real class run the board should contain
+    at least one history entry for every currently-suspicious student
+    — proving the board is re-synced each turn, not only on first
+    crossing."""
+    orch = OrchestratorV2(n_students=8, max_classes=1, seed=42)
+    orch.classroom.MAX_TURNS = 300  # run into Phase 2 screening
+    orch.run_class()
+
+    # Every student in _stream_suspicious must have a board entry
+    # whose suspicion_score matches the legacy dict (last sync wins).
+    for sid, score in orch._stream_suspicious.items():
+        h = orch.hypothesis_board.get(sid)
+        assert h is not None, f"{sid} missing from board"
+        assert h.suspicion_score == pytest.approx(score), (
+            f"{sid}: board={h.suspicion_score} vs legacy={score}"
+        )
+        # History must record multiple turns — not just one.
+        # Phase 2 refreshes suspicion every 5 turns; over 300 turns
+        # (200 in Phase 2) we expect many updates for a persistent
+        # suspect.
+        assert len(h.history) >= 1

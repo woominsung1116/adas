@@ -98,6 +98,49 @@ HYPOTHESIS_LABELS: frozenset[str] = frozenset({
 })
 
 
+#: Mapping from legacy / short hypothesis labels emitted by other
+#: parts of the simulator (notably ``HypothesisTracker.likely_profile``
+#: which uses ``"adhd_hyperactive"``) to the canonical set above.
+#: This table is the single normalization point — callers should
+#: route through ``canonicalize_hypothesis_label`` rather than
+#: inlining string substitutions.
+_LEGACY_HYPOTHESIS_ALIASES: dict[str, str] = {
+    "adhd_hyperactive": "adhd_hyperactive_impulsive",
+    "adhd-hyperactive": "adhd_hyperactive_impulsive",
+    "adhd_h": "adhd_hyperactive_impulsive",
+    "adhd_i": "adhd_inattentive",
+    "adhd_c": "adhd_combined",
+    "normal": "typical",
+    "non_adhd": "typical",
+    "": "unknown",
+}
+
+
+def canonicalize_hypothesis_label(raw: str | None) -> str:
+    """Map any caller-supplied label into ``HYPOTHESIS_LABELS``.
+
+    * ``None``/empty → ``"unknown"``.
+    * Whitespace is stripped and lowercased before lookup.
+    * Legacy aliases (e.g. ``"adhd_hyperactive"``) are rewritten via
+      ``_LEGACY_HYPOTHESIS_ALIASES``.
+    * Anything already in ``HYPOTHESIS_LABELS`` passes through.
+    * Anything else → ``"unknown"`` — never raises. Keeping this
+      total avoids blowing up the simulator when future components
+      invent new labels; the board's canonical set stays the
+      source of truth and noise gets funneled into ``"unknown"``.
+    """
+    if raw is None:
+        return "unknown"
+    key = raw.strip().lower()
+    if not key:
+        return "unknown"
+    if key in HYPOTHESIS_LABELS:
+        return key
+    if key in _LEGACY_HYPOTHESIS_ALIASES:
+        return _LEGACY_HYPOTHESIS_ALIASES[key]
+    return "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Observation objects
 # ---------------------------------------------------------------------------
@@ -406,6 +449,7 @@ def build_observations_from_classroom(classroom_obs: Any) -> TeacherObservationB
 __all__ = [
     "LATENT_FIELD_BLACKLIST",
     "HYPOTHESIS_LABELS",
+    "canonicalize_hypothesis_label",
     "StudentObservation",
     "TeacherObservationBatch",
     "TeacherHypothesis",
