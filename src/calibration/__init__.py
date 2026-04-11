@@ -75,6 +75,15 @@ from .applier import (
     ParameterOverrideError,
 )
 
+from .search_space_loader import (
+    InvalidParameterSpecError,
+    LoadedSearchSpace,
+    load_search_space,
+    load_default_search_space,
+    build_default_search_space,
+    default_student_ranges_path,
+)
+
 __all__ = [
     # loss
     "LossResult",
@@ -124,4 +133,11 @@ __all__ = [
     "DefaultEvaluator",
     "build_default_evaluator",
     "ParameterOverrideError",
+    # search space loader
+    "InvalidParameterSpecError",
+    "LoadedSearchSpace",
+    "load_search_space",
+    "load_default_search_space",
+    "build_default_search_space",
+    "default_student_ranges_path",
 ]
