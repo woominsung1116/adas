@@ -213,6 +213,13 @@ CLASSROOM_ARCHETYPES: dict[str, ClassroomArchetype] = {
 MANAGED_COMPLIANCE = 0.80
 MANAGED_CONSECUTIVE = 25  # ~1 week of sustained improvement
 
+#: Phase 6 slice 15: defensive cap on the number of observable
+#: events handed to ``CognitiveStudent._perceive`` per turn. The
+#: student's own ``att_bandwidth`` does an additional filter on
+#: top of this cap, so a chatty previous turn cannot dominate
+#: either the sort or the attended set.
+_MAX_STUDENT_EVENTS: int = 12
+
 # ADHD behavior pools (mirrored from multi_student_env for consistency)
 _ADHD_BEHAVIORS: dict[str, list[str]] = {
     "adhd_inattentive": [
@@ -1347,6 +1354,21 @@ class ClassroomV2:
         else:
             mood = "calm"
 
+        # Phase 6 slice 15: build a minimal student-perceivable event
+        # payload for this turn. Previous passes kept the field
+        # structurally empty, which starved the CognitiveStudent
+        # perceive→retrieve→reflect loop. The payload is now a
+        # small list of event dicts derived from real simulator
+        # artifacts:
+        #   1. the incoming teacher action this turn (what the teacher is
+        #      about to do — students can hear/see the teacher speaking)
+        #   2. the previous turn's interaction events from the log (peer
+        #      disruption, conflicts, help, chatter — students perceive
+        #      these after they happen)
+        # Only observable fields are included; latent emotional /
+        # cognitive scalars from InteractionEvent are deliberately dropped.
+        current_events = self._build_current_events_for_students(teacher_action)
+
         try:
             return ClassroomContext(
                 turn=self.turn,
@@ -1354,7 +1376,7 @@ class ClassroomV2:
                 day=self.day,
                 subject=self._current_subject(),
                 location=self._current_location(),
-                current_events=[],
+                current_events=current_events,
                 class_mood=mood,
                 teacher_action=teacher_action.action_type,
                 teacher_target=teacher_action.student_id,
@@ -1371,6 +1393,111 @@ class ClassroomV2:
                 teacher_action_type=teacher_action.action_type,
                 teacher_target=teacher_action.student_id,
             )
+
+    def _build_current_events_for_students(
+        self, teacher_action: TeacherAction
+    ) -> list[dict[str, Any]]:
+        """Phase 6 slice 15: observable event payload for ``_perceive``.
+
+        Produces a small, explicit list of dicts shaped exactly as
+        ``CognitiveStudent._perceive`` already expects
+        (``actor`` / ``target`` / ``action`` / ``description`` /
+        ``type`` keys). Two sources, both observable:
+
+        1. **Incoming teacher action.** A single synthetic event
+           describing what the teacher is about to do this turn.
+           ``actor="teacher"`` + ``target=teacher_action.student_id``
+           (or ``"class"`` when the action is not student-directed)
+           + ``action=teacher_action.action_type``. This is always
+           perceivable — students can hear the teacher before the
+           action takes effect.
+        2. **Previous turn's peer interactions.** Pulled from
+           ``self.log.get_events(class_id, turn=self.turn - 1)``.
+           For each InteractionEvent, project into a flat dict
+           containing ONLY the observable fields: actor, target,
+           event_type, action, content. Latent emotional /
+           state scalars (``*_emotions_before`` / ``*_state_after``
+           / inner_thought) are deliberately dropped so no hidden
+           truth reaches the student perceive loop.
+
+        Capped at ``_MAX_STUDENT_EVENTS`` entries total so a
+        highly chatty previous turn cannot dominate the perceive
+        sort. ``CognitiveStudent._perceive`` applies its own
+        ``att_bandwidth`` filter on top of this.
+        """
+        events: list[dict[str, Any]] = []
+
+        # 1. Teacher action event — emitted only when the teacher
+        # is doing something students could plausibly notice:
+        #     * action is not a passive sweep
+        #       (``observe`` with no student target)
+        #     * OR there is an explicit per-student target
+        # A pure passive observation sweep produces no perceivable
+        # event — matching the pre-slice behavior for test harnesses
+        # that drive the environment with generic "observe" actions.
+        action_type = str(teacher_action.action_type or "observe")
+        directed = teacher_action.student_id is not None
+        is_passive_sweep = (action_type == "observe") and not directed
+        if not is_passive_sweep:
+            teacher_event_target = (
+                teacher_action.student_id
+                if teacher_action.student_id
+                else "class"
+            )
+            events.append({
+                "actor": "teacher",
+                "target": teacher_event_target,
+                "action": action_type,
+                "description": str(teacher_action.reasoning or ""),
+                "type": "teacher_action",
+            })
+
+        # 2. Previous turn's peer interaction events.
+        # Only SALIENT event types reach the student perceive stream
+        # so routine chatter does not drown the poignancy scoring or
+        # compound per-turn RNG consumption into unbounded drift.
+        # "Salient" here means: conflict / bullying / aggression /
+        # praise / visible help / correction, plus any event whose
+        # actor is the teacher (last turn's intervention).
+        prev_turn = self.turn - 1
+        if prev_turn >= 1:
+            prev_events = []
+            try:
+                prev_events = self.log.get_events(
+                    class_id=self.class_id, turn=prev_turn,
+                )
+            except Exception:
+                prev_events = []
+            for ev in prev_events:
+                etype = str(getattr(ev, "event_type", "") or "").lower()
+                actor = str(getattr(ev, "actor", "") or "unknown")
+                is_salient = (
+                    actor == "teacher"
+                    or "conflict" in etype
+                    or "bully" in etype
+                    or "anger" in etype
+                    or "praise" in etype
+                    or "correction" in etype
+                    or "help" in etype
+                )
+                if not is_salient:
+                    continue
+                events.append({
+                    "actor": actor,
+                    "target": str(getattr(ev, "target", "") or ""),
+                    "action": str(getattr(ev, "action", "") or ""),
+                    "description": str(getattr(ev, "content", "") or ""),
+                    "type": etype or "peer",
+                })
+
+        # Keep payload bounded so a very chatty previous turn cannot
+        # drown the teacher event. The CognitiveStudent perceive
+        # step still caps at att_bandwidth; this outer cap is just
+        # defensive.
+        if len(events) > _MAX_STUDENT_EVENTS:
+            # Preserve the teacher event (index 0) + most recent N-1.
+            events = [events[0]] + events[1 : _MAX_STUDENT_EVENTS]
+        return events
 
     # ------------------------------------------------------------------
     # Teacher action handling
