@@ -265,6 +265,45 @@ _CLASS_CLIMATE_CALM_MAX: float = 0.10
 _CLASS_CLIMATE_MIXED_MAX: float = 0.40
 
 
+def derive_incident_load(
+    observations: Iterable["StudentObservation"] | tuple["StudentObservation", ...],
+) -> int:
+    """Count teacher-visible incidents this turn.
+
+    Phase 6 slice 8 replacement for the classroom-side event
+    count that used to drive the teacher emotion update's
+    incident channel. Returns the number of students whose
+    ``visible_behaviors`` contain at least one observable
+    disruptive behavior. Uses the same
+    ``_OBSERVABLE_DISRUPTIVE_BEHAVIORS`` filter as
+    ``derive_class_climate``, so the incident load is directly
+    comparable to the fraction that drives the climate label.
+
+    Teacher-visible only:
+      * consults ``StudentObservation.visible_behaviors`` (which
+        have already been scrubbed of latent-fallback sentinels
+        and passed through the perception noise layer)
+      * does NOT read latent state
+      * does NOT read classroom-side bookkeeping
+
+    Scale:
+      * 0 → nothing visibly disruptive this turn
+      * integer in [0, n_students]
+      * passed directly into
+        ``TeacherEmotionalState.update_after_turn`` as the
+        incident argument, which treats any ``> 0`` value as
+        an incident trigger.
+    """
+    count = 0
+    for obs in observations or ():
+        if any(
+            b in _OBSERVABLE_DISRUPTIVE_BEHAVIORS
+            for b in obs.visible_behaviors
+        ):
+            count += 1
+    return count
+
+
 def derive_class_climate(
     observations: Iterable["StudentObservation"] | tuple["StudentObservation", ...],
 ) -> str:
@@ -416,6 +455,11 @@ class TeacherObservationBatch:
     class_mood: str
     observations: tuple[StudentObservation, ...]
     climate: str = "calm"
+    # Phase 6 slice 8: teacher-visible incident load this turn —
+    # integer count of students whose visible_behaviors contain
+    # any observable disruptive behavior. Replaces the old
+    # ``len(info["interactions"])`` input for the emotion update.
+    incident_load: int = 0
 
     def by_student_id(self) -> dict[str, StudentObservation]:
         return {o.student_id: o for o in self.observations}
@@ -732,12 +776,18 @@ def build_observations_from_classroom(
     # becomes the authoritative teacher-facing climate signal
     # consumed by TeacherEmotionalState.update_after_turn.
     climate = derive_class_climate(observations)
+    # Phase 6 slice 8: derive the teacher-visible incident load
+    # from the same observation list so the emotion update's
+    # incident channel no longer depends on classroom-side
+    # interaction counts.
+    incident_load = derive_incident_load(observations)
 
     return TeacherObservationBatch(
         turn=turn,
         class_mood=class_mood,
         observations=tuple(observations),
         climate=climate,
+        incident_load=incident_load,
     )
 
 
@@ -749,6 +799,7 @@ __all__ = [
     "observable_response_label",
     "observable_response_effect",
     "derive_class_climate",
+    "derive_incident_load",
     "StudentObservation",
     "TeacherObservationBatch",
     "TeacherHypothesis",

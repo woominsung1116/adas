@@ -1068,9 +1068,17 @@ class OrchestratorV2:
             # on_calm_mood, so the existing emotion ladder still
             # fires correctly without any TeacherEmotionalState
             # changes.
-            n_incidents = len(info.get("interactions", []))
+            #
+            # Phase 6 slice 8: the second argument is now the
+            # teacher-visible incident load from the same batch,
+            # not the raw ``len(info["interactions"])`` count
+            # that reached into classroom-side bookkeeping. The
+            # batch's ``incident_load`` is derived from the same
+            # observable-only ``visible_behaviors`` set the
+            # climate uses, so the two emotion inputs are
+            # consistent observations of one perception event.
             self.teacher_emotions.update_after_turn(
-                teacher_batch.climate, n_incidents
+                teacher_batch.climate, teacher_batch.incident_load
             )
 
             # 7c. Sample teacher patience (post-update) for calibration metrics
