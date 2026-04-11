@@ -99,6 +99,15 @@ from .constraints import (
     check_constraints,
 )
 
+from .validation import (
+    ValidationScenario,
+    ValidationResult,
+    HeldOutValidationReport,
+    scenarios_overlap,
+    evaluate_config_on_scenarios,
+    build_held_out_report,
+)
+
 __all__ = [
     # loss
     "LossResult",
@@ -166,4 +175,11 @@ __all__ = [
     "parse_rule",
     "parse_constraints",
     "check_constraints",
+    # validation
+    "ValidationScenario",
+    "ValidationResult",
+    "HeldOutValidationReport",
+    "scenarios_overlap",
+    "evaluate_config_on_scenarios",
+    "build_held_out_report",
 ]

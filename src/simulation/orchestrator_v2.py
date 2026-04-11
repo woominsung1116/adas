@@ -676,9 +676,14 @@ class OrchestratorV2:
             dict with "type": "turn" for each turn
             dict with "type": "class_complete" as final yield
         """
-        # Randomly pick a classroom archetype for this class
-        archetype = self._rng.choice(list(CLASSROOM_ARCHETYPES.keys()))
-        self.classroom.set_archetype(archetype)
+        # Pick a classroom archetype for this class.
+        # If the classroom already has a fixed archetype (set via
+        # ClassroomV2(archetype=...) or set_archetype(...)), preserve it
+        # so calibration / held-out validation can pin archetypes
+        # deterministically. Otherwise pick randomly.
+        if getattr(self.classroom, "_archetype_name", None) is None:
+            archetype = self._rng.choice(list(CLASSROOM_ARCHETYPES.keys()))
+            self.classroom.set_archetype(archetype)
 
         obs = self.classroom.reset()
         self.memory.new_class()

@@ -102,6 +102,42 @@ class DefaultAutoresearchSetup:
             f"results_dir={o.results_dir})"
         )
 
+    def validate_best_on_heldout(
+        self,
+        *,
+        best_config: dict[str, Any],
+        scenarios: list,
+        training_scenarios: list | None = None,
+    ):
+        """Convenience method: run held-out validation on `best_config`.
+
+        Uses the evaluator's loaded naturalness / epidemiology targets
+        and, if present, the orchestrator's supported/unsupported
+        constraints so validation respects the same enforcement policy
+        as calibration.
+
+        Args:
+            best_config: the config to validate (typically
+                         `result.global_best_config` from an orchestrator run)
+            scenarios: held-out `ValidationScenario` list
+            training_scenarios: optional training-side scenarios;
+                                if provided, the returned report also
+                                includes train-vs-heldout gap
+
+        Returns:
+            HeldOutValidationReport
+        """
+        from .validation import build_held_out_report
+        return build_held_out_report(
+            config=best_config,
+            training_scenarios=list(training_scenarios or []),
+            heldout_scenarios=list(scenarios),
+            naturalness_targets=self.evaluator.naturalness_targets,
+            epidemiology_targets=self.evaluator.epidemiology_targets,
+            supported_rules=self.orchestrator.supported_constraints,
+            unsupported_rules=self.orchestrator.unsupported_constraints,
+        )
+
     def report(self) -> str:
         """Multi-line detailed report for debugging / logging."""
         ls = self.loaded_space
