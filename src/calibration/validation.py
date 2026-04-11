@@ -130,6 +130,10 @@ class HeldOutValidationReport:
     # readers of the report can tell which recall policy
     # produced the training / held-out loss numbers.
     retrieval_noise_config: Any = None
+    # Phase 6 slice 13: teacher perception noise config that
+    # was active during this validation run. Same audit-only
+    # semantics as retrieval_noise_config above.
+    teacher_noise_config: Any = None
 
     def training_losses(self) -> list[float]:
         return [r.loss.total for r in self.training_results if r.error is None]
@@ -171,6 +175,8 @@ class HeldOutValidationReport:
             f"Held-out scenarios: {len(self.heldout_scenarios)}",
             f"Retrieval noise: "
             f"{_format_retrieval_noise(self.retrieval_noise_config)}",
+            f"Teacher noise: "
+            f"{_format_teacher_noise(self.teacher_noise_config)}",
         ]
 
         t_agg = self.aggregate_training_loss()
@@ -211,6 +217,17 @@ def _format_retrieval_noise(cfg: Any) -> str:
     if dropout == 0.0 and jitter == 0.0:
         return "disabled"
     return f"dropout={dropout:.3f},jitter={jitter:.3f}"
+
+
+def _format_teacher_noise(cfg: Any) -> str:
+    """Compact renderer shared with default_setup / prior_predictive."""
+    if cfg is None:
+        return "disabled"
+    dropout = getattr(cfg, "observation_dropout_prob", 0.0)
+    confusion = getattr(cfg, "observation_confusion_prob", 0.0)
+    if dropout == 0.0 and confusion == 0.0:
+        return "disabled"
+    return f"dropout={dropout:.3f},confusion={confusion:.3f}"
 
 
 def _append_scenario_line(lines: list[str], result: ValidationResult) -> None:
@@ -299,6 +316,7 @@ def _run_scenario_once(
     supported_rules: list[SupportedRule] | None = None,
     unsupported_rules: list[UnsupportedRule] | None = None,
     retrieval_noise_config: Any = None,
+    teacher_noise_config: Any = None,
 ) -> ValidationResult:
     """Evaluate a config once on a single scenario and return a result.
 
@@ -346,6 +364,7 @@ def _run_scenario_once(
                     max_classes=1,
                     seed=class_seed,
                     retrieval_noise_config=retrieval_noise_config,
+                    teacher_noise_config=teacher_noise_config,
                 )
                 if scenario.archetype is not None:
                     orch.classroom.set_archetype(scenario.archetype)
@@ -382,12 +401,15 @@ def evaluate_config_on_scenarios(
     supported_rules: list[SupportedRule] | None = None,
     unsupported_rules: list[UnsupportedRule] | None = None,
     retrieval_noise_config: Any = None,
+    teacher_noise_config: Any = None,
 ) -> list[ValidationResult]:
     """Run a config on each scenario and return per-scenario results.
 
     Phase 6 slice 11: ``retrieval_noise_config`` is forwarded into
     every orchestrator constructed inside ``_run_scenario_once``.
-    Defaults to ``None`` (legacy path — no behavior change).
+    Phase 6 slice 13: ``teacher_noise_config`` is plumbed the same
+    way for teacher perception noise. Both default to ``None``
+    (legacy path — no behavior change).
     """
     out: list[ValidationResult] = []
     for scenario in scenarios:
@@ -399,6 +421,7 @@ def evaluate_config_on_scenarios(
             supported_rules=supported_rules,
             unsupported_rules=unsupported_rules,
             retrieval_noise_config=retrieval_noise_config,
+            teacher_noise_config=teacher_noise_config,
         )
         out.append(result)
     return out
@@ -414,6 +437,7 @@ def build_held_out_report(
     supported_rules: list[SupportedRule] | None = None,
     unsupported_rules: list[UnsupportedRule] | None = None,
     retrieval_noise_config: Any = None,
+    teacher_noise_config: Any = None,
 ) -> HeldOutValidationReport:
     """Run both sides of a train/heldout split and build an aggregate report.
 
@@ -445,6 +469,7 @@ def build_held_out_report(
         supported_rules=supported_rules,
         unsupported_rules=unsupported_rules,
         retrieval_noise_config=retrieval_noise_config,
+        teacher_noise_config=teacher_noise_config,
     )
     heldout_results = evaluate_config_on_scenarios(
         config=config,
@@ -454,6 +479,7 @@ def build_held_out_report(
         supported_rules=supported_rules,
         unsupported_rules=unsupported_rules,
         retrieval_noise_config=retrieval_noise_config,
+        teacher_noise_config=teacher_noise_config,
     )
     return HeldOutValidationReport(
         config=dict(config),
@@ -462,4 +488,5 @@ def build_held_out_report(
         training_results=training_results,
         heldout_results=heldout_results,
         retrieval_noise_config=retrieval_noise_config,
+        teacher_noise_config=teacher_noise_config,
     )

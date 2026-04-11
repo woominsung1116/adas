@@ -99,6 +99,8 @@ class DefaultAutoresearchSetup:
         o = self.orchestrator
         retrieval_cfg = getattr(self.evaluator, "retrieval_noise_config", None)
         retrieval_str = _format_retrieval_noise_config(retrieval_cfg)
+        teacher_cfg = getattr(self.evaluator, "teacher_noise_config", None)
+        teacher_str = _format_teacher_noise_config(teacher_cfg)
         return (
             f"DefaultAutoresearchSetup("
             f"n_params={len(ls.space)}, "
@@ -112,7 +114,8 @@ class DefaultAutoresearchSetup:
             f"n_starts={o.n_starts}, "
             f"n_iterations={o.n_iterations}, "
             f"results_dir={o.results_dir}, "
-            f"retrieval_noise={retrieval_str})"
+            f"retrieval_noise={retrieval_str}, "
+            f"teacher_noise={teacher_str})"
         )
 
     def validate_best_on_heldout(
@@ -122,6 +125,7 @@ class DefaultAutoresearchSetup:
         scenarios: list,
         training_scenarios: list | None = None,
         retrieval_noise_config: Any = None,
+        teacher_noise_config: Any = None,
     ):
         """Convenience method: run held-out validation on `best_config`.
 
@@ -153,10 +157,15 @@ class DefaultAutoresearchSetup:
             HeldOutValidationReport
         """
         from .validation import build_held_out_report
-        effective_noise = (
+        effective_retrieval = (
             retrieval_noise_config
             if retrieval_noise_config is not None
             else getattr(self.evaluator, "retrieval_noise_config", None)
+        )
+        effective_teacher = (
+            teacher_noise_config
+            if teacher_noise_config is not None
+            else getattr(self.evaluator, "teacher_noise_config", None)
         )
         return build_held_out_report(
             config=best_config,
@@ -166,7 +175,8 @@ class DefaultAutoresearchSetup:
             epidemiology_targets=self.evaluator.epidemiology_targets,
             supported_rules=self.orchestrator.supported_constraints,
             unsupported_rules=self.orchestrator.unsupported_constraints,
-            retrieval_noise_config=effective_noise,
+            retrieval_noise_config=effective_retrieval,
+            teacher_noise_config=effective_teacher,
         )
 
     def report(self) -> str:
@@ -203,6 +213,8 @@ class DefaultAutoresearchSetup:
             "Phase 6 noise policy:",
             f"  retrieval_noise_config: "
             f"{_format_retrieval_noise_config(getattr(self.evaluator, 'retrieval_noise_config', None))}",
+            f"  teacher_noise_config: "
+            f"{_format_teacher_noise_config(getattr(self.evaluator, 'teacher_noise_config', None))}",
         ]
         return "\n".join(lines)
 
@@ -222,6 +234,23 @@ def _format_retrieval_noise_config(cfg: Any) -> str:
     if dropout == 0.0 and jitter == 0.0:
         return "disabled"
     return f"dropout={dropout:.3f},jitter={jitter:.3f}"
+
+
+def _format_teacher_noise_config(cfg: Any) -> str:
+    """Compact renderer for Phase 6 slice 13 teacher perception noise.
+
+    Mirrors ``_format_retrieval_noise_config`` wording so the
+    Phase 6 noise policy lines stay consistent across surfaces.
+    Returns ``"disabled"`` for None / no-op configs or
+    ``"dropout=X.XXX,confusion=Y.YYY"`` otherwise.
+    """
+    if cfg is None:
+        return "disabled"
+    dropout = getattr(cfg, "observation_dropout_prob", 0.0)
+    confusion = getattr(cfg, "observation_confusion_prob", 0.0)
+    if dropout == 0.0 and confusion == 0.0:
+        return "disabled"
+    return f"dropout={dropout:.3f},confusion={confusion:.3f}"
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +280,8 @@ def build_default_autoresearch_setup(
     enforce_constraints: bool = True,
     # Phase 6 slice 10: teacher-memory retrieval noise
     retrieval_noise_config: Any = None,
+    # Phase 6 slice 13: teacher perception noise
+    teacher_noise_config: Any = None,
 ) -> DefaultAutoresearchSetup:
     """Assemble a ready-to-run autoresearch setup from harness YAMLs.
 
@@ -321,6 +352,7 @@ def build_default_autoresearch_setup(
         naturalness_yaml=naturalness_yaml,
         epidemiology_yaml=epidemiology_yaml,
         retrieval_noise_config=retrieval_noise_config,
+        teacher_noise_config=teacher_noise_config,
     )
     # Propagate n_students override (build_default_evaluator doesn't
     # take it directly, but DefaultEvaluator has the field)

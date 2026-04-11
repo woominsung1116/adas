@@ -236,6 +236,11 @@ class DefaultEvaluator(EvaluatorProtocol):
     seed: int | None = 42
     n_students: int = 20
     retrieval_noise_config: Any = None
+    # Phase 6 slice 13: teacher perception noise config. When
+    # None, the default (no-op) TeacherNoiseConfig inside
+    # OrchestratorV2 stays in place — existing callers see no
+    # behavior change.
+    teacher_noise_config: Any = None
 
     def evaluate(self, config: dict[str, Any]) -> tuple[Any, LossResult]:
         """Apply config, run N classes, compute combined loss.
@@ -265,6 +270,7 @@ class DefaultEvaluator(EvaluatorProtocol):
                     max_classes=1,
                     seed=class_seed,
                     retrieval_noise_config=self.retrieval_noise_config,
+                    teacher_noise_config=self.teacher_noise_config,
                 )
                 orch.classroom.MAX_TURNS = self.max_turns
                 sub = run_real_bundle(orch, n_classes=1)
@@ -285,6 +291,7 @@ def build_default_evaluator(
     naturalness_yaml=None,
     epidemiology_yaml=None,
     retrieval_noise_config: Any = None,
+    teacher_noise_config: Any = None,
 ) -> DefaultEvaluator:
     """Helper: load YAML targets and return a ready-to-use evaluator.
 
@@ -292,6 +299,10 @@ def build_default_evaluator(
     every orchestrator constructed by this evaluator, so enabling
     teacher-memory retrieval noise for a whole calibration run is
     a single-argument change at the factory level.
+
+    Phase 6 slice 13: ``teacher_noise_config`` is plumbed the same
+    way for teacher perception noise. Default ``None`` preserves
+    legacy behavior.
     """
     from .loader import load_targets, default_harness_paths
 
@@ -310,4 +321,5 @@ def build_default_evaluator(
         max_turns=max_turns,
         seed=seed,
         retrieval_noise_config=retrieval_noise_config,
+        teacher_noise_config=teacher_noise_config,
     )

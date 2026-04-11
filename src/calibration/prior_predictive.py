@@ -43,6 +43,9 @@ class PriorPredictiveReport:
     # readers of a report can tell which recall policy produced
     # the numbers. ``None`` means the legacy path was in effect.
     retrieval_noise_config: Any = None
+    # Phase 6 slice 13: teacher perception noise config active
+    # during the check. Same audit-only semantics as above.
+    teacher_noise_config: Any = None
 
     def n_in_range(self) -> int:
         return sum(1 for v in self.per_target.values() if v["in_range"])
@@ -61,6 +64,8 @@ class PriorPredictiveReport:
             f"N classes: {self.n_classes}, max_turns: {self.max_turns}, seed: {self.seed}",
             f"Retrieval noise: "
             f"{_format_retrieval_noise(self.retrieval_noise_config)}",
+            f"Teacher noise: "
+            f"{_format_teacher_noise(self.teacher_noise_config)}",
             f"Coverage: {self.n_in_range()}/{self.n_total()} "
             f"({self.coverage() * 100:.1f}%) targets in prior range",
             f"",
@@ -86,6 +91,17 @@ def _format_retrieval_noise(cfg: Any) -> str:
     if dropout == 0.0 and jitter == 0.0:
         return "disabled"
     return f"dropout={dropout:.3f},jitter={jitter:.3f}"
+
+
+def _format_teacher_noise(cfg: Any) -> str:
+    """Compact renderer mirroring ``default_setup._format_teacher_noise_config``."""
+    if cfg is None:
+        return "disabled"
+    dropout = getattr(cfg, "observation_dropout_prob", 0.0)
+    confusion = getattr(cfg, "observation_confusion_prob", 0.0)
+    if dropout == 0.0 and confusion == 0.0:
+        return "disabled"
+    return f"dropout={dropout:.3f},confusion={confusion:.3f}"
 
 
 def _evaluate_targets_on_bundle(
@@ -122,6 +138,7 @@ def run_prior_predictive_check(
     naturalness_yaml: Any = None,
     epidemiology_yaml: Any = None,
     retrieval_noise_config: Any = None,
+    teacher_noise_config: Any = None,
 ) -> PriorPredictiveReport:
     """Run a prior predictive check with literature default parameters.
 
@@ -168,6 +185,7 @@ def run_prior_predictive_check(
             max_classes=1,
             seed=class_seed,
             retrieval_noise_config=retrieval_noise_config,
+            teacher_noise_config=teacher_noise_config,
         )
         orch.classroom.MAX_TURNS = max_turns
         sub = run_real_bundle(orch, n_classes=1)
@@ -187,4 +205,5 @@ def run_prior_predictive_check(
         loss_result=loss_result,
         per_target=per_target,
         retrieval_noise_config=retrieval_noise_config,
+        teacher_noise_config=teacher_noise_config,
     )
