@@ -83,20 +83,108 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 @dataclass
+class ObservationOutcome:
+    """Explicit teacher-visible outcome payload for a memory commit.
+
+    Phase 6 slice 2 substrate: before this existed, the memory
+    commit path blended together the observed behaviors, the
+    action taken, a hand-coded ``outcome`` string, and a latent
+    ``state_snapshot`` dump from the student object. That blended
+    shape made it impossible to enforce the partial-observability
+    boundary at the memory layer.
+
+    This dataclass makes the feedback channel explicit and closes
+    the boundary: every field is something the teacher could
+    plausibly observe after their action, never a raw latent
+    scalar. Future passes (delayed feedback, memory noise) can
+    queue / corrupt / redate these payloads without touching the
+    memory storage layer.
+
+    Fields:
+      outcome:         coarse teacher-assigned label — one of
+                       ``"positive"``, ``"neutral"``, ``"negative"``.
+                       The orchestrator derives this from the
+                       student's post-action response in an
+                       observable way (legacy code mapped compliance
+                       thresholds onto these labels; the label
+                       survives, the latent scalar does not).
+      teacher_action:  which action the teacher took this turn
+                       (e.g. ``"individual_intervention"``,
+                       ``"observe"``). Teacher-side fact.
+      post_behaviors:  optional tuple of teacher-visible behaviors
+                       the student exhibited after the action. Empty
+                       tuple when the classroom produced no
+                       high-visibility follow-up. Future delayed-
+                       feedback passes can populate this with
+                       later-turn observations.
+    """
+
+    outcome: str = "neutral"
+    teacher_action: str = "none"
+    post_behaviors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.outcome not in ("positive", "neutral", "negative"):
+            raise ValueError(
+                f"ObservationOutcome.outcome must be positive / neutral / "
+                f"negative, got {self.outcome!r}"
+            )
+        # Normalize to a tuple so the record is hashable-ish and
+        # callers cannot mutate it by reference.
+        if not isinstance(self.post_behaviors, tuple):
+            self.post_behaviors = tuple(self.post_behaviors)
+
+    def as_dict(self) -> dict:
+        return {
+            "outcome": self.outcome,
+            "teacher_action": self.teacher_action,
+            "post_behaviors": list(self.post_behaviors),
+        }
+
+
+@dataclass
 class ObservationRecord:
-    """A single observation stored in the Case Base."""
+    """A single teacher-memory observation.
+
+    Phase 6 slice 2: the former ``state_snapshot`` field (a dump
+    of latent ``distress_level`` / ``compliance`` / ``attention``
+    / ``escalation_risk``) has been removed. Teacher memory now
+    stores only observable cues plus an explicit
+    ``ObservationOutcome`` feedback payload.
+
+    Retrieval (case-base cosine similarity) still works: the
+    similarity function reads ``behavior_vector``, which is
+    derived from ``observed_behaviors`` — no latent fields were
+    ever involved in retrieval.
+    """
 
     student_id: str
     turn: int
     observed_behaviors: list[str]
-    state_snapshot: dict[str, float]  # distress/compliance/attention/escalation
     action_taken: str
-    outcome: str  # 'positive', 'negative', 'neutral'
+    outcome: str  # 'positive' | 'negative' | 'neutral' — kept flat for
+                  # backwards compatibility with existing retrieval code
+                  # that inspects record.outcome directly.
     was_adhd: Optional[bool] = None  # set after identification outcome is known
+    # Explicit teacher-visible feedback payload. The flat ``outcome``
+    # and ``action_taken`` fields above are a convenience mirror of
+    # this object; ``feedback`` is the authoritative source.
+    feedback: Optional["ObservationOutcome"] = None
     behavior_vector: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.behavior_vector = _behavior_vector(self.observed_behaviors)
+        # Keep flat fields and structured feedback in sync.
+        if self.feedback is None:
+            self.feedback = ObservationOutcome(
+                outcome=self.outcome,
+                teacher_action=self.action_taken,
+            )
+        else:
+            # Authoritative source is the feedback object; mirror
+            # its fields onto the flat ones for backward compat.
+            self.outcome = self.feedback.outcome
+            self.action_taken = self.feedback.teacher_action
 
 
 @dataclass
@@ -377,7 +465,10 @@ class TeacherMemory:
         self._profiles: dict[str, StudentProfile] = {}
         self._turn: int = 0
         self._pending_action: dict[str, str] = {}
-        self._pending_state: dict[str, dict[str, float]] = {}
+        # Phase 6 slice 2: _pending_state removed. Teacher memory
+        # no longer stores latent student state scalars; the feedback
+        # path is the explicit ObservationOutcome payload passed into
+        # commit_observation.
         self._pending_behaviors: dict[str, list[str]] = {}
 
         # Phase 2 enhancements: noise, promotion gating, decay
@@ -401,7 +492,6 @@ class TeacherMemory:
         self._profiles = {}
         self._turn = 0
         self._pending_action = {}
-        self._pending_state = {}
         self._pending_behaviors = {}
         self._metrics.classes_seen += 1
         self._current_class_id = self._metrics.classes_seen
@@ -417,51 +507,76 @@ class TeacherMemory:
         self,
         student_id: str,
         behaviors: list[str],
-        state: dict[str, float],
+        state: dict[str, float] | None = None,
         action_taken: str = "none",
     ) -> None:
         """
         Record a new observation for a student.
 
+        Phase 6 slice 2: the ``state`` parameter is accepted for
+        backward compatibility but its contents are NO LONGER
+        stored anywhere inside teacher memory. It was previously
+        copied into ``_pending_state`` and then dumped into
+        ``ObservationRecord.state_snapshot``, which leaked latent
+        ``distress_level`` / ``compliance`` / ``attention`` /
+        ``escalation_risk`` scalars into the long-lived case base.
+        The observable-only memory pipeline now only stores
+        behaviors + teacher actions + a structured
+        ``ObservationOutcome`` payload at commit time.
+
         Args:
             student_id:    Unique student identifier.
-            behaviors:     Observed behavior strings (from ALL_BEHAVIORS vocabulary).
-            state:         State snapshot with keys distress_level, compliance,
-                           attention, escalation_risk.
+            behaviors:     Observed behavior strings (from
+                           ALL_BEHAVIORS vocabulary).
+            state:         IGNORED (accepted for legacy callers).
             action_taken:  Teacher action applied this turn.
         """
+        del state  # explicitly dropped — not stored anywhere
         profile = self._get_or_create_profile(student_id)
         for b in behaviors:
             if b in _BEHAVIOR_INDEX:
                 profile.record_behavior(b)
 
         self._pending_action[student_id] = action_taken
-        self._pending_state[student_id] = dict(state)
         self._pending_behaviors[student_id] = list(behaviors)
 
     def commit_observation(
         self,
         student_id: str,
-        outcome: str = "neutral",
+        outcome: "str | ObservationOutcome" = "neutral",
     ) -> int:
-        """
-        Commit the pending observation to the Case Base with its outcome.
-        Call this after the environment has stepped so outcome is known.
+        """Commit the pending observation to the Case Base.
+
+        Accepts either a plain outcome label (legacy string form)
+        or a structured ``ObservationOutcome`` payload (Phase 6
+        slice 2 explicit feedback channel). In either case the
+        stored record contains NO latent student state.
 
         Args:
             student_id: Student to commit for.
-            outcome:    'positive', 'negative', or 'neutral'.
+            outcome:    ``"positive"`` / ``"neutral"`` / ``"negative"``
+                        string OR an ``ObservationOutcome`` instance
+                        carrying outcome + teacher_action +
+                        optional post_behaviors.
 
         Returns:
             Index of the new record in the Case Base.
         """
+        if isinstance(outcome, ObservationOutcome):
+            feedback = outcome
+        else:
+            feedback = ObservationOutcome(
+                outcome=outcome,
+                teacher_action=self._pending_action.get(student_id, "none"),
+            )
+
         record = ObservationRecord(
             student_id=student_id,
             turn=self._turn,
             observed_behaviors=self._pending_behaviors.get(student_id, []),
-            state_snapshot=self._pending_state.get(student_id, {}),
-            action_taken=self._pending_action.get(student_id, "none"),
-            outcome=outcome,
+            action_taken=feedback.teacher_action,
+            outcome=feedback.outcome,
+            feedback=feedback,
         )
         idx = self.case_base.add(record)
         # Track which class this record belongs to (for principle promotion)

@@ -320,6 +320,7 @@ except ImportError as e:
 try:
     from src.simulation.teacher_memory import (
         TeacherMemory,
+        ObservationOutcome,
         HYPERACTIVITY_BEHAVIORS,
         IMPULSIVITY_BEHAVIORS,
         INATTENTION_BEHAVIORS,
@@ -1863,6 +1864,57 @@ class OrchestratorV2:
     # Memory update
     # ------------------------------------------------------------------
 
+    def _derive_feedback_outcome(
+        self,
+        student_id: str,
+        teacher_action: str,
+    ) -> ObservationOutcome:
+        """Phase 6 slice 2 feedback-translation step.
+
+        Builds an explicit ``ObservationOutcome`` payload for one
+        memory commit, pulling the raw latent compliance ONCE here
+        to produce a coarse teacher-visible outcome label. The
+        scalar itself is discarded immediately; only the label,
+        the teacher_action, and any post-action visible behaviors
+        are stored in the case base. This is the single point
+        where compliance is read for memory feedback — callers
+        must not bypass it.
+
+        The exact coarse thresholds (``>= 0.75`` → positive,
+        ``<= 0.35`` → negative, otherwise neutral) preserve the
+        legacy label distribution the calibration stack was tuned
+        against; a future delayed-feedback pass can replace this
+        immediate read with a queued look-back without changing
+        the ObservationOutcome schema.
+        """
+        student_obj = self.classroom.get_student(student_id)
+        if student_obj is None:
+            return ObservationOutcome(
+                outcome="neutral",
+                teacher_action=teacher_action,
+            )
+        compliance = float(student_obj.state.get("compliance", 0.5))
+        if compliance >= 0.75:
+            label = "positive"
+        elif compliance <= 0.35:
+            label = "negative"
+        else:
+            label = "neutral"
+
+        # Post-action visible behaviors (teacher-visible only; the
+        # same visibility filter the observation builder uses).
+        post_behaviors: tuple[str, ...] = ()
+        visible = getattr(student_obj, "exhibited_behaviors", None) or []
+        post_behaviors = tuple(
+            b for b in visible if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+        )
+
+        return ObservationOutcome(
+            outcome=label,
+            teacher_action=teacher_action,
+            post_behaviors=post_behaviors,
+        )
+
     def _update_memory(
         self,
         obs: ClassroomObservation,
@@ -1895,11 +1947,20 @@ class OrchestratorV2:
                     action.strategy, delta
                 )
 
-        # 1. Detailed observations first -- observe AND commit immediately
+        # 1. Detailed observations first -- observe AND commit immediately.
+        #
+        # Phase 6 slice 2: the latent-state dump from the detailed
+        # observation block is deliberately NOT passed into teacher
+        # memory. The ObservationOutcome feedback payload is the
+        # only path by which outcome signal enters memory, and it
+        # is derived from the post-action compliance by the
+        # orchestrator's feedback-translation step below. This
+        # keeps latent scalars out of the case base while
+        # preserving the same outcome labels the calibration stack
+        # was tuned against.
         for detail in obs.detailed_observations:
             sid = detail.student_id
             behaviors = detail.behaviors
-            state = detail.state_snapshot or {}
 
             track = tracks.get(sid)
             if track:
@@ -1913,22 +1974,21 @@ class OrchestratorV2:
             self.memory.observe(
                 student_id=sid,
                 behaviors=_translate_behaviors(behaviors),
-                state=state,
+                # state explicitly dropped — Phase 6 slice 2 boundary
                 action_taken=action.action_type,
             )
 
-            # Commit immediately so summaries cannot overwrite
-            student_obj = self.classroom.get_student(sid)
-            if student_obj:
-                compliance = student_obj.state.get("compliance", 0.5)
-                if compliance >= 0.75:
-                    outcome = "positive"
-                elif compliance <= 0.35:
-                    outcome = "negative"
-                else:
-                    outcome = "neutral"
-                self.memory.commit_observation(sid, outcome=outcome)
-                committed_this_turn.add(sid)
+            # Derive the teacher-visible outcome LABEL from the
+            # student's post-action compliance. The raw scalar is
+            # used transiently by this feedback-translation step
+            # only — it is NOT stored in memory. What enters memory
+            # is the coarse label wrapped in an ObservationOutcome.
+            feedback = self._derive_feedback_outcome(
+                student_id=sid,
+                teacher_action=action.action_type,
+            )
+            self.memory.commit_observation(sid, outcome=feedback)
+            committed_this_turn.add(sid)
 
         # 2. Student summaries -- skip students already committed this turn
         for summary in obs.student_summaries:
@@ -1949,21 +2009,15 @@ class OrchestratorV2:
                 self.memory.observe(
                     student_id=sid,
                     behaviors=_translate_behaviors(behaviors),
-                    state={},
+                    # state explicitly dropped — Phase 6 slice 2 boundary
                     action_taken="passive_observation",
                 )
-                # Commit summary observations too
-                student_obj = self.classroom.get_student(sid)
-                if student_obj:
-                    compliance = student_obj.state.get("compliance", 0.5)
-                    if compliance >= 0.75:
-                        outcome = "positive"
-                    elif compliance <= 0.35:
-                        outcome = "negative"
-                    else:
-                        outcome = "neutral"
-                    self.memory.commit_observation(sid, outcome=outcome)
-                    committed_this_turn.add(sid)
+                feedback = self._derive_feedback_outcome(
+                    student_id=sid,
+                    teacher_action="passive_observation",
+                )
+                self.memory.commit_observation(sid, outcome=feedback)
+                committed_this_turn.add(sid)
 
     # ------------------------------------------------------------------
     # Log teacher action
