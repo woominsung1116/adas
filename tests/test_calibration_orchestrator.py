@@ -656,3 +656,327 @@ def test_resume_restored_runs_have_empty_history(tmp_path):
     assert result.runs[0].restored_from_checkpoint
     # Per-trial detail is NOT in the JSON checkpoint; it lives in results.tsv
     assert result.runs[0].history == []
+
+
+# ==========================================================================
+# Regression — n_trials persists across repeated resume/save cycles
+# ==========================================================================
+
+
+def test_n_trials_persists_across_resume_save_cycles(tmp_path):
+    """Resume → save → resume again must NOT collapse prior n_trials to 0.
+
+    Before the fix, restored RunState had history=[] so to_dict would
+    emit n_trials=0, silently erasing the count across repeated cycles.
+    """
+    import json as _json
+    from src.calibration.orchestrator import RunState
+
+    space = SearchSpace([
+        ParameterSpec(
+            "adhd_inattentive.emotional.frustration",
+            0.12, 0.25, default=0.19,
+        ),
+    ])
+    ev = _make_small_evaluator()
+
+    # Cycle 1: run 1 start with 3 iterations → 3 trials
+    orch1 = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=3,
+        n_starts=1,
+        seed=10,
+        results_dir=tmp_path,
+    )
+    orch1.run()
+
+    # Inspect checkpoint payload directly
+    ckpt_path = tmp_path / "orchestrator_checkpoint.json"
+    with open(ckpt_path, "r", encoding="utf-8") as f:
+        ckpt = _json.load(f)
+    assert ckpt["runs"][0]["n_trials"] == 3
+
+    # Cycle 2: resume with n_starts=2 → adds a new run. Previous run
+    # must round-trip with n_trials=3, NOT 0.
+    orch2 = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=4,  # different count for new start
+        n_starts=2,
+        seed=10,
+        results_dir=tmp_path,
+    )
+    result2 = orch2.run(resume=True)
+
+    with open(ckpt_path, "r", encoding="utf-8") as f:
+        ckpt2 = _json.load(f)
+    # Original run 0 preserved trial count
+    run0 = [r for r in ckpt2["runs"] if r["start_id"] == 0][0]
+    assert run0["n_trials"] == 3, (
+        f"Expected n_trials=3 preserved, got {run0['n_trials']}"
+    )
+    # New run 1 reports its fresh trial count
+    run1 = [r for r in ckpt2["runs"] if r["start_id"] == 1][0]
+    assert run1["n_trials"] == 4
+
+    # Cycle 3: resume again with n_starts=3 → should still preserve
+    # both run 0 (n_trials=3) and run 1 (n_trials=4)
+    orch3 = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=2,
+        n_starts=3,
+        seed=10,
+        results_dir=tmp_path,
+    )
+    orch3.run(resume=True)
+
+    with open(ckpt_path, "r", encoding="utf-8") as f:
+        ckpt3 = _json.load(f)
+    run0_final = [r for r in ckpt3["runs"] if r["start_id"] == 0][0]
+    run1_final = [r for r in ckpt3["runs"] if r["start_id"] == 1][0]
+    run2_final = [r for r in ckpt3["runs"] if r["start_id"] == 2][0]
+    assert run0_final["n_trials"] == 3
+    assert run1_final["n_trials"] == 4
+    assert run2_final["n_trials"] == 2
+
+
+def test_run_state_trial_count_uses_n_trials_summary():
+    """In-memory run: trial_count() == len(history).
+    Restored run: trial_count() == n_trials_summary."""
+    from src.calibration.orchestrator import RunState
+
+    # In-memory run
+    live = RunState(start_id=0, seed=1, iterations=3)
+    live.history = [Trial(config={}, loss=0.1, iteration=1),
+                    Trial(config={}, loss=0.2, iteration=2),
+                    Trial(config={}, loss=0.3, iteration=3)]
+    assert live.trial_count() == 3
+
+    # Restored run
+    restored = RunState.from_dict({
+        "start_id": 0,
+        "seed": 1,
+        "iterations": 3,
+        "best_loss": 0.1,
+        "best_config": {},
+        "elapsed_seconds": 1.0,
+        "n_trials": 7,
+    })
+    assert restored.history == []
+    assert restored.trial_count() == 7
+    assert restored.to_dict()["n_trials"] == 7
+
+
+def test_run_state_from_dict_missing_n_trials_defaults_to_zero():
+    """Backward-compat: old checkpoints without n_trials key should not crash."""
+    from src.calibration.orchestrator import RunState
+
+    restored = RunState.from_dict({
+        "start_id": 0,
+        "seed": 1,
+        "iterations": 1,
+        "best_loss": 0.5,
+        "best_config": {},
+        "elapsed_seconds": 0.0,
+    })
+    assert restored.trial_count() == 0
+
+
+# ==========================================================================
+# Regression — TSV log records error metadata
+# ==========================================================================
+
+
+def test_tsv_log_has_error_columns(tmp_path):
+    """Header must include new error_type and error_details_json columns."""
+    import csv as _csv
+
+    space = SearchSpace([
+        ParameterSpec(
+            "adhd_inattentive.emotional.frustration", 0.12, 0.25, default=0.19
+        ),
+    ])
+    ev = _make_small_evaluator()
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=1,
+        n_starts=1,
+        seed=5,
+        results_dir=tmp_path,
+    )
+    orch.run()
+
+    with open(tmp_path / "results.tsv", "r", encoding="utf-8") as f:
+        reader = _csv.reader(f, delimiter="\t")
+        header = next(reader)
+    assert "error_type" in header
+    assert "error_details_json" in header
+
+
+def test_tsv_log_valid_trial_leaves_error_columns_empty(tmp_path):
+    """A valid trial writes empty strings for error_type and error_details."""
+    import csv as _csv
+
+    space = SearchSpace([
+        ParameterSpec(
+            "adhd_inattentive.emotional.frustration", 0.12, 0.25, default=0.19
+        ),
+    ])
+    ev = _make_small_evaluator()
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=1,
+        n_starts=1,
+        seed=5,
+        results_dir=tmp_path,
+    )
+    orch.run()
+
+    with open(tmp_path / "results.tsv", "r", encoding="utf-8") as f:
+        reader = _csv.reader(f, delimiter="\t")
+        header = next(reader)
+        rows = list(reader)
+
+    assert len(rows) == 1
+    row = dict(zip(header, rows[0]))
+    assert row["error_type"] == ""
+    assert row["error_details_json"] == ""
+
+
+def test_tsv_log_penalty_trial_writes_error_metadata(tmp_path):
+    """An invalid-override trial persists error_type + offending_keys in TSV."""
+    import csv as _csv
+    import json as _json
+
+    space = SearchSpace([
+        ParameterSpec(
+            "nonexistent_profile.cognitive.att_bandwidth",
+            1, 4, kind="int", default=2,
+        ),
+    ])
+    ev = _make_small_evaluator()
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=2,
+        n_starts=1,
+        seed=11,
+        results_dir=tmp_path,
+    )
+    orch.run()
+
+    with open(tmp_path / "results.tsv", "r", encoding="utf-8") as f:
+        reader = _csv.reader(f, delimiter="\t")
+        header = next(reader)
+        rows = list(reader)
+
+    assert len(rows) == 2  # 2 iterations, both penalized
+    for raw in rows:
+        row = dict(zip(header, raw))
+        assert row["error_type"] == "parameter_override"
+        # error_details_json parses to dict with at least "errors" key
+        details = _json.loads(row["error_details_json"])
+        assert "errors" in details
+        assert details["errors"]  # non-empty
+        # Offending keys are recorded but not full values (privacy + size)
+        assert "offending_keys" in details
+        assert "nonexistent_profile.cognitive.att_bandwidth" in details["offending_keys"]
+
+
+def test_tsv_log_mixed_valid_and_invalid_rows(tmp_path):
+    """When trials alternate valid/invalid, each row carries the correct
+    error metadata or empty strings."""
+    import csv as _csv
+    import json as _json
+    from src.calibration import ParameterOverrideError
+    from src.calibration.orchestrator import EvaluatorProtocol
+    from src.calibration.loss import LossResult
+
+    class ToggleEvaluator(EvaluatorProtocol):
+        def __init__(self):
+            self._count = 0
+        def evaluate(self, config):
+            self._count += 1
+            if self._count % 2 == 1:
+                raise ParameterOverrideError(
+                    ["toggle-fault: simulated"], config
+                )
+            return (None, LossResult(total=0.5))
+
+    space = SearchSpace([
+        ParameterSpec("adhd_inattentive.emotional.frustration", 0.12, 0.25, default=0.19),
+    ])
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ToggleEvaluator(),
+        proposer_kind="random",
+        n_iterations=4,
+        n_starts=1,
+        seed=13,
+        results_dir=tmp_path,
+    )
+    orch.run()
+
+    with open(tmp_path / "results.tsv", "r", encoding="utf-8") as f:
+        reader = _csv.reader(f, delimiter="\t")
+        header = next(reader)
+        rows = list(reader)
+
+    # 2 penalized + 2 valid
+    penalized = [dict(zip(header, r)) for r in rows if r[header.index("error_type")] == "parameter_override"]
+    valid = [dict(zip(header, r)) for r in rows if r[header.index("error_type")] == ""]
+    assert len(penalized) == 2
+    assert len(valid) == 2
+    for row in valid:
+        assert row["error_details_json"] == ""
+    for row in penalized:
+        details = _json.loads(row["error_details_json"])
+        assert "errors" in details
+
+
+def test_tsv_log_backward_compat_first_8_columns(tmp_path):
+    """Existing analyzers reading the first 8 columns must still work."""
+    import csv as _csv
+
+    space = SearchSpace([
+        ParameterSpec(
+            "adhd_inattentive.emotional.frustration", 0.12, 0.25, default=0.19
+        ),
+    ])
+    ev = _make_small_evaluator()
+    orch = AutoresearchOrchestrator(
+        space=space,
+        evaluator=ev,
+        proposer_kind="random",
+        n_iterations=1,
+        n_starts=1,
+        seed=99,
+        results_dir=tmp_path,
+    )
+    orch.run()
+
+    with open(tmp_path / "results.tsv", "r", encoding="utf-8") as f:
+        reader = _csv.reader(f, delimiter="\t")
+        header = next(reader)
+    # First 8 columns preserved in exact original order
+    expected_first_8 = [
+        "timestamp",
+        "start_id",
+        "iteration",
+        "loss_total",
+        "loss_naturalness",
+        "loss_epidemiology",
+        "loss_sparsity",
+        "config_json",
+    ]
+    assert header[:8] == expected_first_8

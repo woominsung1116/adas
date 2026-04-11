@@ -71,6 +71,12 @@ class RunState:
     the trial-level history is NOT restored (only run-level summary fields),
     and `restored_from_checkpoint=True` is set. Downstream code that needs
     per-trial detail must read it from the TSV log, not from `history`.
+
+    The `n_trials_summary` field preserves the trial count across
+    checkpoint round-trips. For in-memory executed runs it stays at -1
+    and `trial_count()` falls back to `len(history)`; for restored runs
+    it holds the value read from the JSON payload so repeated
+    save → resume → save cycles do not collapse the count to zero.
     """
 
     start_id: int
@@ -84,6 +90,19 @@ class RunState:
     # in the current Python process. Such runs have partial history (trial
     # detail lives in results.tsv; only run-level fields round-trip via JSON).
     restored_from_checkpoint: bool = False
+    # Persisted trial count for round-tripping through checkpoint JSON.
+    # -1 sentinel means "not explicitly set"; `trial_count()` then falls
+    # back to `len(history)`. Restored runs always set this to the value
+    # from the checkpoint payload so the count is preserved even though
+    # per-trial detail is not.
+    n_trials_summary: int = -1
+
+    def trial_count(self) -> int:
+        """Canonical trial count: prefers persisted summary when set,
+        otherwise uses `len(history)` for in-memory runs."""
+        if self.n_trials_summary >= 0:
+            return self.n_trials_summary
+        return len(self.history)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,7 +112,9 @@ class RunState:
             "best_loss": self.best_loss,
             "best_config": self.best_config,
             "elapsed_seconds": self.elapsed_seconds,
-            "n_trials": len(self.history),
+            # Canonical trial count (preserved across restore/save cycles).
+            # Trial-level detail is still NOT serialized; only the count.
+            "n_trials": self.trial_count(),
         }
 
     @classmethod
@@ -103,8 +124,15 @@ class RunState:
         Restored runs are summary-only — `history` is left empty because
         per-trial detail is not stored in the checkpoint JSON. The
         `restored_from_checkpoint` flag is set so downstream analyses can
-        detect partial reconstructions.
+        detect partial reconstructions. `n_trials_summary` preserves the
+        stored trial count so repeated resume/save cycles do not silently
+        erase it.
         """
+        n_trials_raw = payload.get("n_trials", 0)
+        try:
+            n_trials = int(n_trials_raw)
+        except (TypeError, ValueError):
+            n_trials = 0
         return cls(
             start_id=int(payload.get("start_id", 0)),
             seed=int(payload.get("seed", 0)),
@@ -114,6 +142,7 @@ class RunState:
             history=[],  # not stored in checkpoint; see TSV log instead
             elapsed_seconds=float(payload.get("elapsed_seconds", 0.0)),
             restored_from_checkpoint=True,
+            n_trials_summary=n_trials,
         )
 
 
@@ -138,9 +167,11 @@ class OrchestratorResult:
         for run in self.runs:
             mark = "★" if run.start_id == self.global_best_start_id else " "
             suffix = " [restored]" if getattr(run, "restored_from_checkpoint", False) else ""
+            n_trials = run.trial_count() if hasattr(run, "trial_count") else len(run.history)
             lines.append(
                 f"  {mark} start {run.start_id}: best={run.best_loss:.6f} "
-                f"iter={run.iterations} ({run.elapsed_seconds:.1f}s){suffix}"
+                f"iter={run.iterations} trials={n_trials} "
+                f"({run.elapsed_seconds:.1f}s){suffix}"
             )
         return "\n".join(lines)
 
@@ -212,6 +243,11 @@ class AutoresearchOrchestrator:
     # Logging
     # ------------------------------------------------------------------
 
+    # TSV columns. Two trailing error columns were added so that penalized
+    # trials (parameter override failures, generic evaluator exceptions) can
+    # be identified post-hoc from the log alone. Valid trials leave both
+    # columns empty. Order is additive — existing columns are unchanged so
+    # older parsers still work for the first 8 fields.
     _LOG_COLUMNS = [
         "timestamp",
         "start_id",
@@ -221,6 +257,8 @@ class AutoresearchOrchestrator:
         "loss_epidemiology",
         "loss_sparsity",
         "config_json",
+        "error_type",
+        "error_details_json",
     ]
 
     def _ensure_log_header(self) -> None:
@@ -230,13 +268,45 @@ class AutoresearchOrchestrator:
             writer = csv.writer(f, delimiter="\t")
             writer.writerow(self._LOG_COLUMNS)
 
+    @staticmethod
+    def _trial_error_fields(trial_metadata: dict[str, Any]) -> tuple[str, str]:
+        """Return (error_type, error_details_json) for TSV logging.
+
+        Valid trials (empty metadata) get two empty strings. Penalized
+        trials get a compact JSON blob with the relevant error fields
+        only — kept small to avoid bloating the log.
+        """
+        if not trial_metadata:
+            return ("", "")
+        error_type = str(trial_metadata.get("error_type", ""))
+        # Build a minimal deterministic detail payload
+        detail: dict[str, Any] = {}
+        if "errors" in trial_metadata:
+            detail["errors"] = trial_metadata["errors"]
+        if "error_message" in trial_metadata:
+            detail["message"] = trial_metadata["error_message"]
+        if "offending_config" in trial_metadata:
+            # Only record the KEYS of the offending config, not full values,
+            # to avoid blowing up the log with large configs
+            offending = trial_metadata["offending_config"]
+            if isinstance(offending, dict):
+                detail["offending_keys"] = sorted(offending.keys())
+        if not detail:
+            return (error_type, "")
+        return (
+            error_type,
+            json.dumps(detail, ensure_ascii=False, sort_keys=True),
+        )
+
     def _log_trial(
         self,
         start_id: int,
         iteration: int,
         loss_result: LossResult,
         config: dict[str, Any],
+        trial_metadata: dict[str, Any] | None = None,
     ) -> None:
+        error_type, error_details = self._trial_error_fields(trial_metadata or {})
         with open(self.log_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f, delimiter="\t")
             writer.writerow(
@@ -249,6 +319,8 @@ class AutoresearchOrchestrator:
                     f"{loss_result.epidemiology_loss:.6f}",
                     f"{loss_result.sparsity_penalty:.6f}",
                     json.dumps(config, ensure_ascii=False, sort_keys=True),
+                    error_type,
+                    error_details,
                 ]
             )
 
@@ -335,7 +407,9 @@ class AutoresearchOrchestrator:
             )
             state.history.append(trial)
 
-            self._log_trial(start_id, it, loss_result, config)
+            self._log_trial(
+                start_id, it, loss_result, config, trial_metadata
+            )
 
             # Track best
             if loss_scalar < state.best_loss:
