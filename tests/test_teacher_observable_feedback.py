@@ -154,13 +154,34 @@ def test_derive_feedback_outcome_source_has_no_latent_compliance_read():
 
 def test_update_memory_hypothesis_feedback_has_no_latent_compliance_read():
     """Static guard: the Phase 2b hypothesis-test effect recording
-    must use the observable-response helper, not compliance."""
-    src = inspect.getsource(OrchestratorV2._update_memory)
+    must not read latent compliance anywhere in the _update_memory
+    body. Phase 6 slice 6 moved the ``observable_response_effect``
+    call out of _update_memory and into
+    ``_drain_hypothesis_feedback_queue`` / the flush helper, so
+    _update_memory now just enqueues. The latent-compliance
+    probes must stay gone from _update_memory, and the
+    observable-response helper must still be the one computing
+    the effect — it just lives in the drain path now.
+    """
+    um_src = inspect.getsource(OrchestratorV2._update_memory)
     # Legacy compliance-history delta line is gone.
-    assert "track.compliance_history[-1]" not in src
-    assert "curr_compliance" not in src
-    # The new path must call observable_response_effect.
-    assert "observable_response_effect" in src
+    assert "track.compliance_history[-1]" not in um_src
+    assert "curr_compliance" not in um_src
+
+    # The observable-response helper must still be the one
+    # computing the effect, just in the drain path.
+    drain_src = inspect.getsource(
+        OrchestratorV2._drain_hypothesis_feedback_queue
+    )
+    flush_src = inspect.getsource(
+        OrchestratorV2._flush_hypothesis_feedback_queue
+    )
+    assert "observable_response_effect" in drain_src
+    assert "observable_response_effect" in flush_src
+    # And the drain / flush helpers must also stay latent-free.
+    for body in (drain_src, flush_src):
+        assert ".state.get(" not in body
+        assert "compliance" not in body
 
 
 # ---------------------------------------------------------------------------

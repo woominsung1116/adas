@@ -322,6 +322,7 @@ try:
         TeacherMemory,
         ObservationOutcome,
         PendingObservationFeedback,
+        PendingHypothesisFeedback,
         FeedbackDelayQueue,
         HYPERACTIVITY_BEHAVIORS,
         IMPULSIVITY_BEHAVIORS,
@@ -741,6 +742,12 @@ class OrchestratorV2:
         # deferred to a later pass.
         self.feedback_delay_turns: int = max(0, int(feedback_delay_turns))
         self._feedback_queue: FeedbackDelayQueue = FeedbackDelayQueue()
+        # Phase 6 slice 6: parallel queue holding
+        # PendingHypothesisFeedback items. Hypothesis-test effects
+        # are staged here and drained `feedback_delay_turns` turns
+        # later so the teacher's diagnosis learning is subject to
+        # the same delay policy as their memory commits.
+        self._hypothesis_feedback_queue: FeedbackDelayQueue = FeedbackDelayQueue()
         # Phase 6 slice 1: per-class teacher observation + hypothesis board.
         # Reset inside stream_class; pre-initialized here so callers can
         # access these attributes before the first class runs.
@@ -858,6 +865,9 @@ class OrchestratorV2:
         # so stale cross-class pending items do not bleed into a
         # fresh run. Each class starts with an empty queue.
         self._feedback_queue = FeedbackDelayQueue()
+        # Phase 6 slice 6: same reset for hypothesis-test
+        # feedback queue.
+        self._hypothesis_feedback_queue = FeedbackDelayQueue()
 
         # Phase 6 slice 5: re-seed the teacher noise RNG from the
         # stored master seed plus the class counter so successive
@@ -887,6 +897,10 @@ class OrchestratorV2:
             # informed by matured memory rather than instantaneous
             # reinforcement.
             self._drain_feedback_queue(current_turn=turn)
+            # Phase 6 slice 6: drain the hypothesis-test feedback
+            # queue at the same boundary so the diagnosis learning
+            # obeys the same delay policy as memory commits.
+            self._drain_hypothesis_feedback_queue(current_turn=turn)
 
             # 1. Teacher decides action
             prev_suspicious_ids = set(self._stream_suspicious.keys())
@@ -1070,6 +1084,9 @@ class OrchestratorV2:
         # step. Matters for small unit-test classes where MAX_TURNS
         # is tiny; harmless in 950-turn runs.
         self._flush_feedback_queue()
+        # Phase 6 slice 6: flush any pending hypothesis-test
+        # effects staged on the final turns for the same reason.
+        self._flush_hypothesis_feedback_queue()
 
         # Final: compile and yield class_complete
         result = self._compile_class_result(
@@ -2002,6 +2019,86 @@ class OrchestratorV2:
             )
         return len(due)
 
+    def _drain_hypothesis_feedback_queue(self, current_turn: int) -> int:
+        """Apply every matured pending hypothesis-test effect.
+
+        Phase 6 slice 6. For each item whose ``due_turn`` has
+        arrived:
+          1. Query the current teacher-visible disruptive
+             behaviors for the student (applying perception
+             noise, same as ``_derive_feedback_outcome``).
+          2. Compute the observable response effect via
+             ``observable_response_effect`` using the pre
+             snapshot stored on the queue item.
+          3. If the student still has a ``HypothesisTracker``,
+             call ``tracker.record_test(strategy, effect)``.
+             Missing trackers (e.g. student was ruled out after
+             the intervention ran) are silently skipped — the
+             intervention simply has no teacher-side learning
+             effect once the tracker is gone.
+
+        Returns the number of items successfully applied (items
+        with missing students or missing trackers do not count).
+        """
+        due = self._hypothesis_feedback_queue.pop_due(current_turn)
+        applied = 0
+        for pending in due:
+            tracker = self._hypothesis_trackers.get(pending.student_id)
+            if tracker is None:
+                continue
+            student_obj = self.classroom.get_student(pending.student_id)
+            if student_obj is None:
+                continue
+            post_raw = getattr(student_obj, "exhibited_behaviors", None) or []
+            post_filtered = tuple(
+                b for b in post_raw if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+            )
+            post_visible = apply_observation_noise(
+                post_filtered,
+                self._teacher_noise_rng,
+                self.teacher_noise_config,
+            )
+            effect = observable_response_effect(
+                pending.pre_visible_disruptive,
+                post_visible,
+            )
+            tracker.record_test(pending.strategy, effect)
+            applied += 1
+        return applied
+
+    def _flush_hypothesis_feedback_queue(self) -> int:
+        """Apply every pending hypothesis-test effect regardless of due_turn.
+
+        Called once at class end so interventions staged on the
+        final turns still reach the tracker. Same semantics as
+        ``_drain_hypothesis_feedback_queue``.
+        """
+        remaining = self._hypothesis_feedback_queue.flush_all()
+        applied = 0
+        for pending in remaining:
+            tracker = self._hypothesis_trackers.get(pending.student_id)
+            if tracker is None:
+                continue
+            student_obj = self.classroom.get_student(pending.student_id)
+            if student_obj is None:
+                continue
+            post_raw = getattr(student_obj, "exhibited_behaviors", None) or []
+            post_filtered = tuple(
+                b for b in post_raw if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+            )
+            post_visible = apply_observation_noise(
+                post_filtered,
+                self._teacher_noise_rng,
+                self.teacher_noise_config,
+            )
+            effect = observable_response_effect(
+                pending.pre_visible_disruptive,
+                post_visible,
+            )
+            tracker.record_test(pending.strategy, effect)
+            applied += 1
+        return applied
+
     def _flush_feedback_queue(self) -> int:
         """Commit every pending memory observation, regardless of due_turn.
 
@@ -2122,39 +2219,30 @@ class OrchestratorV2:
         committed_this_turn: set[str] = set()
         pre_step_visible = pre_step_visible or {}
 
-        # Phase 6 slice 4: record hypothesis-test effect from an
-        # OBSERVABLE post-action behavior change, replacing the
-        # previous latent-compliance delta. The effect is a small
-        # signed float in [-0.20, +0.20] chosen so that the
-        # existing ``likely_profile`` thresholds (±0.03..±0.05,
-        # tuned against compliance deltas) still separate
-        # anxiety / adhd / odd verdicts.
+        # Phase 6 slice 4 + slice 6: stage the hypothesis-test
+        # effect on a delayed queue instead of recording it
+        # immediately. The drain step (run at the start of the
+        # next matching turn) will query the teacher-visible
+        # post snapshot, compute the observable response effect,
+        # and then call ``HypothesisTracker.record_test``. This
+        # mirrors the delayed memory-commit path so the teacher's
+        # diagnosis learning also obeys the same delay policy.
         if (
             action.student_id
             and action.strategy in _HYPOTHESIS_TEST_STRATEGIES
             and action.student_id in self._hypothesis_trackers
         ):
-            student_obj = self.classroom.get_student(action.student_id)
-            if student_obj is not None:
-                pre_visible = pre_step_visible.get(action.student_id, ())
-                post_raw = getattr(student_obj, "exhibited_behaviors", None) or []
-                post_filtered = tuple(
-                    b for b in post_raw if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+            self._hypothesis_feedback_queue.enqueue(
+                PendingHypothesisFeedback(
+                    student_id=action.student_id,
+                    strategy=action.strategy,
+                    observed_turn=turn,
+                    due_turn=turn + self.feedback_delay_turns,
+                    pre_visible_disruptive=pre_step_visible.get(
+                        action.student_id, ()
+                    ),
                 )
-                # Phase 6 slice 5: apply perception noise to the
-                # POST snapshot as well. The teacher's post-action
-                # observation is an independent perception event
-                # and may drop / confuse behaviors differently
-                # from the pre snapshot.
-                post_visible = apply_observation_noise(
-                    post_filtered,
-                    self._teacher_noise_rng,
-                    self.teacher_noise_config,
-                )
-                effect = observable_response_effect(pre_visible, post_visible)
-                self._hypothesis_trackers[action.student_id].record_test(
-                    action.strategy, effect
-                )
+            )
 
         # 1. Detailed observations first -- observe now, ENQUEUE
         # the commit for the delayed-feedback queue.

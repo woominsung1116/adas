@@ -241,8 +241,64 @@ class PendingObservationFeedback:
         }
 
 
+@dataclass
+class PendingHypothesisFeedback:
+    """A hypothesis-test effect queued for a later turn (Phase 6 slice 6).
+
+    Before this slice, `_update_memory` called
+    `HypothesisTracker.record_test(strategy, effect)` immediately
+    on the same turn the intervention ran, so the teacher's
+    hypothesis learning had unrealistic instant feedback. This
+    dataclass represents a hypothesis-test outcome that has been
+    STAGED but not yet applied.
+
+    Fields intentionally avoid any latent scalar — exactly the
+    same observable-only policy as
+    ``PendingObservationFeedback``. Outcome derivation happens at
+    drain time through ``observable_response_effect``.
+
+    Fields:
+      student_id:             the student whose hypothesis tracker
+                              should receive the update
+      strategy:               the hypothesis-test strategy applied
+                              (one of ``_HYPOTHESIS_TEST_STRATEGIES``)
+      observed_turn:          turn on which the intervention ran
+      due_turn:               turn at which the tracker update
+                              should actually happen
+      pre_visible_disruptive: teacher-visible disruptive behaviors
+                              snapshotted BEFORE the intervention
+                              ran — same semantics as the
+                              ``PendingObservationFeedback``
+                              field of the same name
+    """
+
+    student_id: str
+    strategy: str
+    observed_turn: int
+    due_turn: int
+    pre_visible_disruptive: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict:
+        return {
+            "student_id": self.student_id,
+            "strategy": self.strategy,
+            "observed_turn": self.observed_turn,
+            "due_turn": self.due_turn,
+            "pre_visible_disruptive": list(self.pre_visible_disruptive),
+        }
+
+
 class FeedbackDelayQueue:
-    """Minimal FIFO queue for delayed-feedback memory commits.
+    """Minimal FIFO queue for delayed-feedback items.
+
+    Generic over any payload type that exposes a ``due_turn: int``
+    attribute. The orchestrator owns two instances:
+
+      * ``_feedback_queue`` — holds ``PendingObservationFeedback``
+        for delayed teacher-memory commits
+      * ``_hypothesis_feedback_queue`` — holds
+        ``PendingHypothesisFeedback`` for delayed
+        hypothesis-tracker updates
 
     Determinism:
       * order-preserving: items are popped in the order they were
@@ -257,24 +313,24 @@ class FeedbackDelayQueue:
     """
 
     def __init__(self) -> None:
-        self._items: list[PendingObservationFeedback] = []
+        self._items: list = []
 
     def __len__(self) -> int:
         return len(self._items)
 
-    def enqueue(self, item: PendingObservationFeedback) -> None:
+    def enqueue(self, item) -> None:
         self._items.append(item)
 
-    def peek_all(self) -> list[PendingObservationFeedback]:
+    def peek_all(self) -> list:
         return list(self._items)
 
-    def pop_due(self, current_turn: int) -> list[PendingObservationFeedback]:
+    def pop_due(self, current_turn: int) -> list:
         """Return and remove every item whose ``due_turn <= current_turn``.
 
         The remaining items keep their original relative order.
         """
-        due: list[PendingObservationFeedback] = []
-        rest: list[PendingObservationFeedback] = []
+        due: list = []
+        rest: list = []
         for item in self._items:
             if item.due_turn <= current_turn:
                 due.append(item)
@@ -283,7 +339,7 @@ class FeedbackDelayQueue:
         self._items = rest
         return due
 
-    def flush_all(self) -> list[PendingObservationFeedback]:
+    def flush_all(self) -> list:
         """Return and remove every pending item. Used at class end."""
         out = self._items
         self._items = []
