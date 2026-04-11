@@ -221,6 +221,32 @@ MANAGED_CONSECUTIVE = 25  # ~1 week of sustained improvement
 _MAX_STUDENT_EVENTS: int = 12
 
 
+#: Phase 6 slice 17: high-visibility disruptive behavior set used
+#: to derive the student-side classroom mood signal from peer
+#: behavior instead of latent ``distress_level`` / ``attention``
+#: averages. Mirrors the teacher-side ``_DISRUPTIVE_VISIBLE_BEHAVIORS``
+#: / ``_OBSERVABLE_DISRUPTIVE_BEHAVIORS`` sets so the boundary is
+#: consistent across teacher and student perception paths.
+_STUDENT_VISIBLE_DISRUPTIVE_BEHAVIORS: frozenset[str] = frozenset({
+    "out_of_seat",
+    "calling_out",
+    "interrupting",
+    "excessive_talking",
+    "running_in_classroom",
+    "fidgeting",
+    "emotional_outburst",
+})
+
+
+#: Phase 6 slice 17: fraction cut points for the behavior-derived
+#: student-side class mood ladder. Thresholds are conservative —
+#: the cognitive path only reacts to ``"chaotic"`` today, and the
+#: slice 7 teacher-side climate ladder uses a similar calm/mixed/
+#: chaotic split at (0.10, 0.40).
+_STUDENT_MOOD_CALM_MAX: float = 0.10
+_STUDENT_MOOD_TENSE_MAX: float = 0.40
+
+
 #: Phase 6 slice 16: map each teacher action_type to a coarse,
 #: student-visible description. Returns ``None`` for actions the
 #: simulator treats as internal bookkeeping (e.g. ``identify_adhd``,
@@ -1384,17 +1410,14 @@ class ClassroomV2:
     # ------------------------------------------------------------------
 
     def _make_context(self, teacher_action: TeacherAction) -> ClassroomContext:
-        # Compute class mood for context
-        avg_distress = _mean([s.state.get("distress_level", 0.1) for s in self.students])
-        avg_attention = _mean([s.state.get("attention", 0.5) for s in self.students])
-        if avg_distress > 0.5:
-            mood = "tense"
-        elif avg_attention > 0.6:
-            mood = "calm"
-        elif avg_attention < 0.35:
-            mood = "chaotic"
-        else:
-            mood = "calm"
+        # Phase 6 slice 17: compute class mood for the student-side
+        # CognitiveStudent path from OBSERVABLE peer behavior. The
+        # previous derivation reached into hidden aggregate truth
+        # and broke the "students perceive only what peers visibly
+        # do" boundary. The replacement counts how many peers are
+        # currently exhibiting any behavior in the visible disruption
+        # set and maps that fraction through a small explicit ladder.
+        mood = self._derive_student_class_mood()
 
         # Phase 6 slice 15: build a minimal student-perceivable event
         # payload for this turn. Previous passes kept the field
@@ -1435,6 +1458,42 @@ class ClassroomV2:
                 teacher_action_type=teacher_action.action_type,
                 teacher_target=teacher_action.student_id,
             )
+
+    def _derive_student_class_mood(self) -> str:
+        """Phase 6 slice 17: behavior-derived student class mood.
+
+        Counts students currently exhibiting any behavior in
+        ``_STUDENT_VISIBLE_DISRUPTIVE_BEHAVIORS`` and maps the
+        fraction through a small explicit ladder:
+
+          fraction <= 0.10             → "calm"
+          0.10 < fraction <= 0.40      → "tense"
+          fraction > 0.40              → "chaotic"
+
+        Reads ONLY ``student.exhibited_behaviors`` — the same
+        field the teacher visibility filter consults — so the
+        student-side and teacher-side class-level signals are
+        consistent about what "visible" means.
+
+        Returns ``"calm"`` on an empty classroom (edge case).
+        """
+        students = getattr(self, "students", None) or []
+        n = len(students)
+        if n == 0:
+            return "calm"
+        disruptive_count = 0
+        for s in students:
+            behaviors = getattr(s, "exhibited_behaviors", None) or []
+            if any(
+                b in _STUDENT_VISIBLE_DISRUPTIVE_BEHAVIORS for b in behaviors
+            ):
+                disruptive_count += 1
+        fraction = disruptive_count / float(n)
+        if fraction <= _STUDENT_MOOD_CALM_MAX:
+            return "calm"
+        if fraction <= _STUDENT_MOOD_TENSE_MAX:
+            return "tense"
+        return "chaotic"
 
     def _build_current_events_for_students(
         self, teacher_action: TeacherAction
