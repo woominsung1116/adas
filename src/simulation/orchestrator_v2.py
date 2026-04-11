@@ -347,6 +347,8 @@ try:
         TeacherHypothesisBoard,
         build_observations_from_classroom,
         canonicalize_hypothesis_label,
+        observable_response_label,
+        observable_response_effect,
     )
 except ImportError as e:
     raise ImportError(
@@ -901,6 +903,23 @@ class OrchestratorV2:
                     )
                     pre_intervention_sid = action.student_id
 
+            # Phase 6 slice 4: snapshot teacher-visible disruptive
+            # behaviors for every student BEFORE the environment
+            # step executes. This is the "pre" side of the
+            # observable-response heuristic used by both the
+            # delayed-feedback queue (for memory outcome labels)
+            # and the Phase 2b hypothesis-test effect recording.
+            # The snapshot contains only behaviors already in
+            # ``_DISRUPTIVE_VISIBLE_BEHAVIORS`` — the same set the
+            # teacher observation builder exposes — so no latent
+            # scalars are captured.
+            pre_step_visible: dict[str, tuple[str, ...]] = {}
+            for _s in self.classroom.students:
+                _vis = getattr(_s, "exhibited_behaviors", None) or []
+                pre_step_visible[_s.student_id] = tuple(
+                    b for b in _vis if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+                )
+
             # 2. Execute in environment
             self._stream_obs, reward, done, info = self.classroom.step(action)
 
@@ -921,7 +940,10 @@ class OrchestratorV2:
                     })
 
             # 3. Update teacher memory and tracks
-            self._update_memory(self._stream_obs, action, info, self._stream_tracks, turn)
+            self._update_memory(
+                self._stream_obs, action, info, self._stream_tracks, turn,
+                pre_step_visible=pre_step_visible,
+            )
 
             # 3b. Synchronize the hypothesis board with the turn-end
             # suspicion / diagnosis state. This runs every turn so the
@@ -1902,21 +1924,19 @@ class OrchestratorV2:
     def _drain_feedback_queue(self, current_turn: int) -> int:
         """Commit every pending memory observation whose delay has matured.
 
-        Phase 6 slice 3. Called once at the start of each turn, and
-        once more at class end (via ``_flush_feedback_queue``) so
-        tail-end observations still land in memory. Returns the
-        number of items committed for observability in tests.
-
-        For each due pending item, re-derive an ``ObservationOutcome``
-        through the observable-only feedback path and push it onto
-        the case base via ``memory.append_record``. This is the only
-        place where queued pending items convert into real records.
+        Phase 6 slice 3 + slice 4. Called once at the start of each
+        turn. For each mature pending item, derive the outcome
+        through the observable-response heuristic (compares the
+        pre-action visible disruption snapshot stored on the
+        pending item against the post-delay visible disruption
+        queried now) and push the record into the case base.
         """
         due = self._feedback_queue.pop_due(current_turn)
         for pending in due:
             feedback = self._derive_feedback_outcome(
                 student_id=pending.student_id,
                 teacher_action=pending.teacher_action,
+                pre_visible_disruptive=pending.pre_visible_disruptive,
             )
             self.memory.append_record(
                 student_id=pending.student_id,
@@ -1930,7 +1950,7 @@ class OrchestratorV2:
         """Commit every pending memory observation, regardless of due_turn.
 
         Called once at class end so observations staged on the final
-        turns still reach memory. Uses the same observable-only
+        turns still reach memory. Uses the same observable-response
         feedback path as ``_drain_feedback_queue``.
         """
         remaining = self._feedback_queue.flush_all()
@@ -1938,6 +1958,7 @@ class OrchestratorV2:
             feedback = self._derive_feedback_outcome(
                 student_id=pending.student_id,
                 teacher_action=pending.teacher_action,
+                pre_visible_disruptive=pending.pre_visible_disruptive,
             )
             self.memory.append_record(
                 student_id=pending.student_id,
@@ -1951,51 +1972,58 @@ class OrchestratorV2:
         self,
         student_id: str,
         teacher_action: str,
+        *,
+        pre_visible_disruptive: tuple[str, ...] = (),
     ) -> ObservationOutcome:
-        """Phase 6 slice 2 feedback-translation step.
+        """Phase 6 slice 4 feedback-translation step — observable only.
 
         Builds an explicit ``ObservationOutcome`` payload for one
-        memory commit, pulling the raw latent compliance ONCE here
-        to produce a coarse teacher-visible outcome label. The
-        scalar itself is discarded immediately; only the label,
-        the teacher_action, and any post-action visible behaviors
-        are stored in the case base. This is the single point
-        where compliance is read for memory feedback — callers
-        must not bypass it.
+        memory commit from a behavior-based comparison of
+        teacher-visible disruption BEFORE the observation turn's
+        action and AFTER the delay has elapsed.
 
-        The exact coarse thresholds (``>= 0.75`` → positive,
-        ``<= 0.35`` → negative, otherwise neutral) preserve the
-        legacy label distribution the calibration stack was tuned
-        against; a future delayed-feedback pass can replace this
-        immediate read with a queued look-back without changing
-        the ObservationOutcome schema.
+        ``pre_visible_disruptive`` is the snapshot captured at
+        enqueue time (in the per-turn loop, immediately before
+        ``classroom.step(action)``), so it reflects exactly what
+        the teacher could see when they decided to act. The
+        post side is queried from the current student state at
+        drain time via the same filter.
+
+        The observable ladder lives in
+        ``teacher_observation.observable_response_label``.
+        Fallback: if the student object cannot be found
+        (e.g. mid-reset or missing id), return a ``"neutral"``
+        payload. This is the ONLY remaining fallback and does
+        not read any latent scalar.
+
+        No latent scalar reads anywhere in this function.
         """
         student_obj = self.classroom.get_student(student_id)
         if student_obj is None:
             return ObservationOutcome(
                 outcome="neutral",
                 teacher_action=teacher_action,
+                post_behaviors=(),
             )
-        compliance = float(student_obj.state.get("compliance", 0.5))
-        if compliance >= 0.75:
-            label = "positive"
-        elif compliance <= 0.35:
-            label = "negative"
-        else:
-            label = "neutral"
 
-        # Post-action visible behaviors (teacher-visible only; the
-        # same visibility filter the observation builder uses).
-        post_behaviors: tuple[str, ...] = ()
-        visible = getattr(student_obj, "exhibited_behaviors", None) or []
-        post_behaviors = tuple(
-            b for b in visible if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+        # Post-delay visible disruptive behaviors — same filter
+        # as ``_DISRUPTIVE_VISIBLE_BEHAVIORS`` the teacher
+        # observation builder uses. This is the post side of the
+        # observable-response comparison.
+        post_raw = getattr(student_obj, "exhibited_behaviors", None) or []
+        post_visible = tuple(
+            b for b in post_raw if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+        )
+
+        label = observable_response_label(
+            pre_visible=pre_visible_disruptive,
+            post_visible=post_visible,
         )
 
         return ObservationOutcome(
             outcome=label,
             teacher_action=teacher_action,
-            post_behaviors=post_behaviors,
+            post_behaviors=post_visible,
         )
 
     def _update_memory(
@@ -2005,29 +2033,51 @@ class OrchestratorV2:
         info: dict,
         tracks: dict[str, _StudentTrack],
         turn: int,
+        *,
+        pre_step_visible: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Record observations and outcomes in TeacherMemory and local tracks.
 
         Detailed observations are processed and committed first so that
         subsequent summary processing cannot overwrite them.
-        Also records compliance deltas for hypothesis testing interventions.
+        Also records observable-response effects for hypothesis testing
+        interventions (Phase 6 slice 4).
+
+        ``pre_step_visible`` is a per-student snapshot of the
+        teacher-visible disruptive behaviors captured BEFORE the
+        classroom step executed. It is used by the Phase 2b
+        observable-response effect computation and by the
+        delayed-feedback enqueue step so the eventual drain can
+        compare pre vs post visible state without reading latent
+        scalars. When ``None`` (e.g. legacy callers), pre is
+        treated as empty — in that case all observable effects
+        are negative/neutral, never spuriously positive.
         """
         committed_this_turn: set[str] = set()
+        pre_step_visible = pre_step_visible or {}
 
-        # Record hypothesis test results: measure compliance delta from intervention
+        # Phase 6 slice 4: record hypothesis-test effect from an
+        # OBSERVABLE post-action behavior change, replacing the
+        # previous latent-compliance delta. The effect is a small
+        # signed float in [-0.20, +0.20] chosen so that the
+        # existing ``likely_profile`` thresholds (±0.03..±0.05,
+        # tuned against compliance deltas) still separate
+        # anxiety / adhd / odd verdicts.
         if (
             action.student_id
             and action.strategy in _HYPOTHESIS_TEST_STRATEGIES
             and action.student_id in self._hypothesis_trackers
         ):
             student_obj = self.classroom.get_student(action.student_id)
-            track = tracks.get(action.student_id)
-            if student_obj and track and track.compliance_history:
-                prev_compliance = track.compliance_history[-1]
-                curr_compliance = student_obj.state.get("compliance", prev_compliance)
-                delta = curr_compliance - prev_compliance
+            if student_obj is not None:
+                pre_visible = pre_step_visible.get(action.student_id, ())
+                post_raw = getattr(student_obj, "exhibited_behaviors", None) or []
+                post_visible = tuple(
+                    b for b in post_raw if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+                )
+                effect = observable_response_effect(pre_visible, post_visible)
                 self._hypothesis_trackers[action.student_id].record_test(
-                    action.strategy, delta
+                    action.strategy, effect
                 )
 
         # 1. Detailed observations first -- observe now, ENQUEUE
@@ -2070,6 +2120,7 @@ class OrchestratorV2:
                     teacher_action=action.action_type,
                     observed_turn=turn,
                     due_turn=turn + self.feedback_delay_turns,
+                    pre_visible_disruptive=pre_step_visible.get(sid, ()),
                 )
             )
             committed_this_turn.add(sid)
@@ -2104,6 +2155,7 @@ class OrchestratorV2:
                         teacher_action="passive_observation",
                         observed_turn=turn,
                         due_turn=turn + self.feedback_delay_turns,
+                        pre_visible_disruptive=pre_step_visible.get(sid, ()),
                     )
                 )
                 committed_this_turn.add(sid)

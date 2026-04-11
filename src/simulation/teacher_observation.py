@@ -146,6 +146,106 @@ _LEGACY_HYPOTHESIS_ALIASES: dict[str, str] = {
 }
 
 
+def observable_response_label(
+    pre_visible: Iterable[str] | tuple[str, ...],
+    post_visible: Iterable[str] | tuple[str, ...],
+) -> str:
+    """Map an observable behavior-change delta to a coarse label.
+
+    Phase 6 slice 4: this is the behavior-only replacement for
+    the old latent-compliance threshold mapping used by
+    ``_derive_feedback_outcome``. Callers pass the set of
+    teacher-visible disruptive behaviors seen BEFORE the action
+    (or observation turn) and the set seen AFTER the action
+    (at drain turn). No latent scalar is involved.
+
+    Decision ladder (first match wins):
+      1. pre non-empty, post empty → ``"positive"``
+         (visible disruption completely disappeared)
+      2. pre empty, post empty → ``"neutral"``
+         (no disruption before or after — nothing to react to)
+      3. pre empty, post non-empty → ``"negative"``
+         (new disruption appeared after the action)
+      4. post is strictly smaller than pre (fewer disruptive
+         behaviors) → ``"positive"``
+      5. post is strictly larger than pre → ``"negative"``
+      6. same non-zero count → ``"neutral"`` (persistence, no
+         change — deliberately conservative; "still disruptive"
+         is not labeled negative because the teacher can't
+         distinguish "intervention failed" from "intervention
+         had no time yet")
+
+    Parameters:
+      pre_visible:  disruptive behaviors the teacher could see
+                    before the action executed
+      post_visible: disruptive behaviors the teacher can see at
+                    the time this function is called
+
+    Returns:
+      one of ``"positive"``, ``"neutral"``, ``"negative"``
+    """
+    pre_set = set(pre_visible or ())
+    post_set = set(post_visible or ())
+    pre_n, post_n = len(pre_set), len(post_set)
+
+    if pre_n > 0 and post_n == 0:
+        return "positive"
+    if pre_n == 0 and post_n == 0:
+        return "neutral"
+    if pre_n == 0 and post_n > 0:
+        return "negative"
+    if post_n < pre_n:
+        return "positive"
+    if post_n > pre_n:
+        return "negative"
+    return "neutral"
+
+
+#: Mapping from ``observable_response_label`` + magnitude to a
+#: pseudo-delta scalar. Used by the Phase 2b hypothesis-testing
+#: path so that ``HypothesisTracker.likely_profile`` thresholds
+#: (calibrated against compliance deltas in the ±0.03..±0.05
+#: range) still produce meaningful verdicts without reading
+#: latent compliance. The values are deliberately small so the
+#: existing thresholds still separate anxiety / adhd / odd.
+_OBSERVABLE_EFFECT_VANISHED: float = 0.20
+_OBSERVABLE_EFFECT_REDUCED: float = 0.10
+_OBSERVABLE_EFFECT_PERSISTENCE: float = 0.00
+_OBSERVABLE_EFFECT_ESCALATED: float = -0.10
+_OBSERVABLE_EFFECT_EMERGED: float = -0.20
+
+
+def observable_response_effect(
+    pre_visible: Iterable[str] | tuple[str, ...],
+    post_visible: Iterable[str] | tuple[str, ...],
+) -> float:
+    """Signed effect-size proxy for hypothesis-test feedback.
+
+    Same inputs as ``observable_response_label``, but returns a
+    small float in ``[-0.20, +0.20]`` so that
+    ``HypothesisTracker.record_test`` / ``likely_profile`` (which
+    average a list of effect values and compare to fixed
+    thresholds like ±0.03 / ±0.05) still classify strategies
+    meaningfully. The sign is positive when disruption decreased
+    after the intervention, negative when it increased.
+    """
+    pre_set = set(pre_visible or ())
+    post_set = set(post_visible or ())
+    pre_n, post_n = len(pre_set), len(post_set)
+
+    if pre_n > 0 and post_n == 0:
+        return _OBSERVABLE_EFFECT_VANISHED
+    if pre_n == 0 and post_n == 0:
+        return _OBSERVABLE_EFFECT_PERSISTENCE
+    if pre_n == 0 and post_n > 0:
+        return _OBSERVABLE_EFFECT_EMERGED
+    if post_n < pre_n:
+        return _OBSERVABLE_EFFECT_REDUCED
+    if post_n > pre_n:
+        return _OBSERVABLE_EFFECT_ESCALATED
+    return _OBSERVABLE_EFFECT_PERSISTENCE
+
+
 def canonicalize_hypothesis_label(raw: str | None) -> str:
     """Map any caller-supplied label into ``HYPOTHESIS_LABELS``.
 
@@ -538,6 +638,8 @@ __all__ = [
     "LATENT_FIELD_BLACKLIST",
     "HYPOTHESIS_LABELS",
     "canonicalize_hypothesis_label",
+    "observable_response_label",
+    "observable_response_effect",
     "StudentObservation",
     "TeacherObservationBatch",
     "TeacherHypothesis",

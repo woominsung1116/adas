@@ -222,6 +222,13 @@ class PendingObservationFeedback:
     teacher_action: str
     observed_turn: int
     due_turn: int
+    # Phase 6 slice 4: teacher-visible disruptive behaviors the
+    # teacher saw BEFORE the action executed. Used at drain time
+    # by the observable-response feedback heuristic to label the
+    # commit ``positive`` / ``negative`` / ``neutral`` without
+    # reading latent compliance. Empty tuple means the teacher
+    # had nothing disruptive to see before acting.
+    pre_visible_disruptive: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -230,6 +237,7 @@ class PendingObservationFeedback:
             "teacher_action": self.teacher_action,
             "observed_turn": self.observed_turn,
             "due_turn": self.due_turn,
+            "pre_visible_disruptive": list(self.pre_visible_disruptive),
         }
 
 

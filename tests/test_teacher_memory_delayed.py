@@ -241,18 +241,24 @@ def test_queue_items_carry_no_latent_state(tmp_path):
     snapshot = orch._feedback_queue.peek_all()
     assert snapshot  # something staged on turn 1
     for p in snapshot:
-        # Only the known-observable fields exist
+        # Only the known-observable fields exist. pre_visible_disruptive
+        # was added in Phase 6 slice 4 and is also observable-only.
         assert set(PendingObservationFeedback.__dataclass_fields__.keys()) == {
             "student_id",
             "observed_behaviors",
             "teacher_action",
             "observed_turn",
             "due_turn",
+            "pre_visible_disruptive",
         }
         # No latent values
         d = p.as_dict()
         for latent in ("distress_level", "compliance", "attention", "escalation_risk", "state_snapshot"):
             assert latent not in d
+        # pre_visible_disruptive must be a tuple of strings.
+        assert isinstance(p.pre_visible_disruptive, tuple)
+        for b in p.pre_visible_disruptive:
+            assert isinstance(b, str)
     # Consume the rest
     for _ in gen:
         pass
