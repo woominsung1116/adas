@@ -41,6 +41,11 @@ from typing import Any
 
 from .orchestrator import AutoresearchOrchestrator
 from .applier import DefaultEvaluator, build_default_evaluator
+from .constraints import (
+    SupportedRule,
+    UnsupportedRule,
+    parse_constraints,
+)
 from .search_space_loader import (
     LoadedSearchSpace,
     load_default_search_space,
@@ -61,18 +66,24 @@ class DefaultAutoresearchSetup:
                     + unsupported_sections all preserved)
       evaluator:    DefaultEvaluator already configured with target YAMLs
       orchestrator: AutoresearchOrchestrator ready to `.run()`
+      supported_rules:  parsed SupportedRule list (forwarded to orchestrator
+                        for pre-evaluation filtering)
+      unsupported_rules: parsed UnsupportedRule list (surfaced for
+                         transparency, never enforced)
 
     Access patterns:
         setup = build_default_autoresearch_setup(n_iterations=10)
         setup.orchestrator.run()
-        print(setup.loaded_space.constraints)
-        print(setup.loaded_space.metadata)
-        print(setup.loaded_space.unsupported_sections)
+        print(setup.loaded_space.constraints)   # raw YAML dicts
+        print(setup.supported_rules)             # parsed + enforced
+        print(setup.unsupported_rules)           # parsed + never enforced
     """
 
     loaded_space: LoadedSearchSpace
     evaluator: DefaultEvaluator
     orchestrator: AutoresearchOrchestrator
+    supported_rules: list[SupportedRule] = field(default_factory=list)
+    unsupported_rules: list[UnsupportedRule] = field(default_factory=list)
 
     def summary(self) -> str:
         """One-line human-readable summary of the setup."""
@@ -82,6 +93,8 @@ class DefaultAutoresearchSetup:
             f"DefaultAutoresearchSetup("
             f"n_params={len(ls.space)}, "
             f"n_constraints={len(ls.constraints)}, "
+            f"supported_rules={len(self.supported_rules)}, "
+            f"unsupported_rules={len(self.unsupported_rules)}, "
             f"unsupported_sections={len(ls.unsupported_sections)}, "
             f"proposer={o.proposer_kind}, "
             f"n_starts={o.n_starts}, "
@@ -96,7 +109,9 @@ class DefaultAutoresearchSetup:
         lines = [
             "=== Default Autoresearch Setup ===",
             f"Search space: {len(ls.space)} parameters",
-            f"Constraints: {len(ls.constraints)} (parsed, not enforced)",
+            f"Constraints: {len(ls.constraints)} raw "
+            f"(supported: {len(self.supported_rules)}, "
+            f"unsupported: {len(self.unsupported_rules)})",
             f"Metadata keys: {sorted(ls.metadata.keys())}",
             f"Unsupported sections: {ls.unsupported_sections}",
             "",
@@ -106,6 +121,8 @@ class DefaultAutoresearchSetup:
             f"  n_iterations: {o.n_iterations}",
             f"  seed: {o.seed}",
             f"  results_dir: {o.results_dir}",
+            f"  constraint enforcement: "
+            f"{'active' if o.supported_constraints else 'inactive'}",
             "",
             "Evaluator:",
             f"  n_classes: {self.evaluator.n_classes}",
@@ -140,6 +157,8 @@ def build_default_autoresearch_setup(
     search_space_yaml: Path | str | None = None,
     naturalness_yaml: Path | str | None = None,
     epidemiology_yaml: Path | str | None = None,
+    # Constraint enforcement
+    enforce_constraints: bool = True,
 ) -> DefaultAutoresearchSetup:
     """Assemble a ready-to-run autoresearch setup from harness YAMLs.
 
@@ -180,6 +199,11 @@ def build_default_autoresearch_setup(
         from .search_space_loader import load_search_space
         loaded_space = load_search_space(search_space_yaml)
 
+    # Parse raw YAML constraint dicts into supported / unsupported rules.
+    supported_rules, unsupported_rules = parse_constraints(
+        loaded_space.constraints
+    )
+
     # Build evaluator from target YAMLs
     evaluator = build_default_evaluator(
         n_classes=n_classes,
@@ -198,6 +222,12 @@ def build_default_autoresearch_setup(
     else:
         results_dir_path = Path(results_dir)
 
+    # Only forward supported rules if enforcement is on.
+    # Unsupported rules are always surfaced on the bundle for
+    # transparency regardless of enforcement.
+    orch_supported = supported_rules if enforce_constraints else []
+    orch_unsupported = unsupported_rules if enforce_constraints else []
+
     orchestrator = AutoresearchOrchestrator(
         space=loaded_space.space,
         evaluator=evaluator,
@@ -208,10 +238,14 @@ def build_default_autoresearch_setup(
         results_dir=results_dir_path,
         early_stop_patience=early_stop_patience,
         proposer_kwargs=proposer_kwargs,
+        supported_constraints=orch_supported,
+        unsupported_constraints=orch_unsupported,
     )
 
     return DefaultAutoresearchSetup(
         loaded_space=loaded_space,
         evaluator=evaluator,
         orchestrator=orchestrator,
+        supported_rules=supported_rules,
+        unsupported_rules=unsupported_rules,
     )

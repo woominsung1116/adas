@@ -89,6 +89,16 @@ from .default_setup import (
     build_default_autoresearch_setup,
 )
 
+from .constraints import (
+    SupportedRule,
+    UnsupportedRule,
+    ConstraintCheckResult,
+    ConstraintViolationError,
+    parse_rule,
+    parse_constraints,
+    check_constraints,
+)
+
 __all__ = [
     # loss
     "LossResult",
@@ -148,4 +158,12 @@ __all__ = [
     # default setup
     "DefaultAutoresearchSetup",
     "build_default_autoresearch_setup",
+    # constraints
+    "SupportedRule",
+    "UnsupportedRule",
+    "ConstraintCheckResult",
+    "ConstraintViolationError",
+    "parse_rule",
+    "parse_constraints",
+    "check_constraints",
 ]

@@ -38,6 +38,13 @@ from .proposer import ProposerBase, SearchSpace, Trial, make_proposer
 # (math, logs) does not break.
 INVALID_CONFIG_PENALTY: float = 1e6
 
+# Distinct penalty for configs that pass applier but violate a supported
+# constraint (e.g. abs(delta.cognitive.att_bandwidth) not greater than
+# abs(delta.cognitive.impulse_override) for adhd_inattentive). Slightly
+# lower than INVALID_CONFIG_PENALTY so that constraint-violating trials
+# are distinguishable in loss histograms but still heavily dispreferred.
+CONSTRAINT_VIOLATION_PENALTY: float = 0.9e6
+
 
 # ---------------------------------------------------------------------------
 # Evaluator protocol
@@ -220,6 +227,8 @@ class AutoresearchOrchestrator:
         checkpoint_filename: str = "orchestrator_checkpoint.json",
         early_stop_patience: int | None = None,
         proposer_kwargs: dict | None = None,
+        supported_constraints: list | None = None,
+        unsupported_constraints: list | None = None,
     ) -> None:
         self.space = space
         self.evaluator = evaluator
@@ -229,6 +238,16 @@ class AutoresearchOrchestrator:
         self.seed = seed
         self.early_stop_patience = early_stop_patience
         self.proposer_kwargs = proposer_kwargs or {}
+
+        # Constraint-aware filtering (optional).
+        # - supported_constraints: parsed SupportedRule list — enforced
+        #   before evaluator execution. Violations produce a penalized
+        #   trial with error_type="constraint_violation".
+        # - unsupported_constraints: parsed UnsupportedRule list — never
+        #   enforced, but surfaced via trial metadata on violations so
+        #   users can see what rules were ignored.
+        self.supported_constraints = list(supported_constraints or [])
+        self.unsupported_constraints = list(unsupported_constraints or [])
 
         if results_dir is None:
             results_dir = Path(".harness")
@@ -285,6 +304,18 @@ class AutoresearchOrchestrator:
             detail["errors"] = trial_metadata["errors"]
         if "error_message" in trial_metadata:
             detail["message"] = trial_metadata["error_message"]
+        # Constraint-violation specific fields
+        if "violations" in trial_metadata:
+            detail["violations"] = [
+                {"profile": v.get("profile"), "kind": v.get("kind"), "raw": v.get("raw")}
+                for v in trial_metadata["violations"]
+            ]
+        if "violation_messages" in trial_metadata:
+            detail["violation_messages"] = trial_metadata["violation_messages"]
+        if "unsupported_rules" in trial_metadata:
+            detail["unsupported_rule_count"] = len(
+                trial_metadata["unsupported_rules"]
+            )
         if "offending_config" in trial_metadata:
             # Only record the KEYS of the offending config, not full values,
             # to avoid blowing up the log with large configs
@@ -360,8 +391,12 @@ class AutoresearchOrchestrator:
         self, start_id: int, seed: int
     ) -> RunState:
         """Run one independent optimization from a fresh proposer state."""
-        # Local import to avoid import cycle at module load
+        # Local imports to avoid import cycle at module load
         from .applier import ParameterOverrideError
+        from .constraints import (
+            check_constraints,
+            ConstraintViolationError,
+        )
 
         proposer: ProposerBase = make_proposer(
             self.proposer_kind, self.space, seed=seed, **self.proposer_kwargs
@@ -380,8 +415,52 @@ class AutoresearchOrchestrator:
             try:
                 config = proposer.propose(state.history)
                 config = self.space.clip_config(config)
+
+                # Pre-evaluation constraint check (Phase 4.5 enforcement).
+                # Skip the expensive simulator if a supported constraint
+                # is violated. Unsupported constraints are never enforced.
+                if self.supported_constraints:
+                    check = check_constraints(
+                        config,
+                        self.supported_constraints,
+                        self.unsupported_constraints,
+                    )
+                    if not check.valid:
+                        raise ConstraintViolationError(
+                            check.violations, config, check.unsupported
+                        )
+
                 _, loss_result = self.evaluator.evaluate(config)
                 loss_scalar = loss_result.total
+            except ConstraintViolationError as exc:
+                # Supported-constraint violation: penalized trial with
+                # distinct error_type so it is clearly separable from
+                # parameter_override failures in TSV / history.
+                loss_scalar = CONSTRAINT_VIOLATION_PENALTY
+                loss_result = LossResult(total=CONSTRAINT_VIOLATION_PENALTY)
+                trial_metadata["error_type"] = "constraint_violation"
+                trial_metadata["violations"] = [
+                    {
+                        "profile": v.profile,
+                        "kind": v.kind,
+                        "raw": v.raw,
+                        "rationale": v.rationale,
+                    }
+                    for v in exc.violations
+                ]
+                trial_metadata["violation_messages"] = (
+                    # Rebuild human-readable from the exception
+                    str(exc).split(": ", 1)[-1].split("; ")
+                )
+                # Unsupported constraints also surfaced so users can see
+                # which rules are inert.
+                if exc.unsupported:
+                    trial_metadata["unsupported_rules"] = [
+                        {"raw": u.raw, "reason": u.reason}
+                        for u in exc.unsupported
+                    ]
+                # Offending config KEYS only (bounded log size)
+                trial_metadata["offending_config"] = dict(exc.config)
             except ParameterOverrideError as exc:
                 # Config had one or more non-applicable entries. Do NOT
                 # treat as baseline — assign a large finite penalty so the
