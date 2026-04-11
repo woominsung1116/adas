@@ -25,10 +25,27 @@ Dotted-key convention (matches `applier.parse_key`):
   <profile>.emotional.<field>
   <profile>.observable.<field>
 
+Supported parameter kinds:
+  - float (default for unmarked entries with numeric range)
+  - int   (cognitive fields like att_bandwidth/vision_r/retention)
+  - choice: YAML entry may use
+        kind: choice
+        choices: [a, b, c]
+        default: a   # optional, must be in choices
+    Choice parameters bypass range/int detection entirely. Validated:
+    missing/empty `choices` list raises, default-not-in-choices raises.
+
 Default-value precedence (for ParameterSpec.default):
   1. explicit `default:` in YAML entry
   2. live simulator value (via `cognitive_agent` module lookup)
-  3. midpoint of [lo, hi]
+  3. midpoint of [lo, hi] (for float/int) or first choice (for choice)
+
+Profile validation:
+  YAML sections named `<profile>_deltas` are resolved (via alias map
+  where needed) and validated against the live `cognitive_agent.PROFILE_DELTAS`
+  table. Typos or unknown profile names fail loudly at load time with
+  `InvalidParameterSpecError` instead of being silently accepted and
+  causing penalty trials during evaluation.
 
 Unknown/malformed entries fail loudly with `InvalidParameterSpecError`
 rather than being silently skipped.
@@ -228,6 +245,67 @@ def _choose_default(
     return float(candidate)
 
 
+def _build_choice_spec(
+    context: str,
+    field_name: str,
+    entry: dict[str, Any],
+    dotted: str,
+    sources_out: dict[str, str],
+) -> ParameterSpec:
+    """Build a choice-kind ParameterSpec. Validates loudly on malformed input.
+
+    Required YAML shape:
+        kind: choice
+        choices: [a, b, c]
+        default: a  # optional, must be in choices if present
+
+    Args:
+        context: caller description used in error messages (e.g.
+                 "base_cognitive" or "adhd_inattentive_deltas.cognitive")
+        field_name: the field key under the section
+        entry: the YAML entry dict
+        dotted: the canonical dotted path for routing / sources
+        sources_out: mutable dict of name → citation
+    """
+    raw_choices = entry.get("choices")
+    if raw_choices is None:
+        raise InvalidParameterSpecError(
+            f"{context}.{field_name}: kind=choice requires 'choices' list"
+        )
+    if not isinstance(raw_choices, (list, tuple)):
+        raise InvalidParameterSpecError(
+            f"{context}.{field_name}: 'choices' must be a list, got "
+            f"{type(raw_choices).__name__}"
+        )
+    choices = list(raw_choices)
+    if not choices:
+        raise InvalidParameterSpecError(
+            f"{context}.{field_name}: 'choices' list is empty"
+        )
+    # Default: if explicit, must be in choices; else fall back to choices[0]
+    explicit_default = entry.get("default")
+    if explicit_default is not None and explicit_default not in choices:
+        raise InvalidParameterSpecError(
+            f"{context}.{field_name}: default {explicit_default!r} not in "
+            f"choices {choices!r}"
+        )
+    default = explicit_default if explicit_default is not None else choices[0]
+
+    source_str = entry.get("source", "")
+    if source_str:
+        sources_out[dotted] = source_str
+
+    return ParameterSpec(
+        name=dotted,
+        lo=0.0,  # unused for choice kind
+        hi=0.0,
+        kind="choice",
+        choices=choices,
+        default=default,
+        source=source_str,
+    )
+
+
 def _build_base_param_specs(
     section_key: str,
     section_body: dict[str, Any],
@@ -237,7 +315,23 @@ def _build_base_param_specs(
     out: list[ParameterSpec] = []
     prefix = _SCALAR_PARAM_SECTIONS[section_key]["dotted_prefix"]
     for field_name, entry in (section_body or {}).items():
-        if not isinstance(entry, dict) or "range" not in entry:
+        if not isinstance(entry, dict):
+            raise InvalidParameterSpecError(
+                f"{section_key}.{field_name}: entry must be a dict; got {entry!r}"
+            )
+        dotted = f"{prefix}.{field_name}"
+
+        # Choice kind: explicit `kind: choice` bypasses range/int detection.
+        if entry.get("kind") == "choice":
+            out.append(
+                _build_choice_spec(
+                    section_key, field_name, entry, dotted, sources_out
+                )
+            )
+            continue
+
+        # Numeric (float/int) kind: requires `range` field.
+        if "range" not in entry:
             raise InvalidParameterSpecError(
                 f"{section_key}.{field_name}: missing 'range' or not a dict; got {entry!r}"
             )
@@ -254,7 +348,6 @@ def _build_base_param_specs(
         kind = _infer_kind(lo, hi, entry.get("default"), section_key, field_name)
         live = _live_default_for_base(section_key, field_name)
         default = _choose_default(entry.get("default"), live, lo, hi, kind)
-        dotted = f"{prefix}.{field_name}"
         source_str = entry.get("source", "")
         if source_str:
             sources_out[dotted] = source_str
@@ -280,6 +373,28 @@ def _resolve_profile_name(yaml_section_key: str) -> str:
     return _PROFILE_ALIAS.get(base, base)
 
 
+def _validate_profile_exists(yaml_key: str, profile: str) -> None:
+    """Verify that a resolved profile name exists in live PROFILE_DELTAS.
+
+    Fails loudly at load time rather than silently accepting typos that
+    would otherwise fail later in applier/evaluator as penalty trials.
+    """
+    try:
+        from src.simulation import cognitive_agent as ca
+    except Exception as exc:
+        # If we cannot import cognitive_agent at all, skip validation —
+        # the loader still works in environments where the simulator is
+        # not importable (e.g. pure YAML unit tests). The applier will
+        # catch any downstream mismatch.
+        return
+    if profile not in ca.PROFILE_DELTAS:
+        known = sorted(ca.PROFILE_DELTAS.keys())
+        raise InvalidParameterSpecError(
+            f"{yaml_key}: resolved profile name {profile!r} not found in "
+            f"cognitive_agent.PROFILE_DELTAS. Known profiles: {known}"
+        )
+
+
 def _build_profile_delta_specs(
     yaml_key: str,
     body: dict[str, Any],
@@ -288,10 +403,17 @@ def _build_profile_delta_specs(
     """Convert a `<profile>_deltas` section into ParameterSpec list.
 
     Each subsection (cognitive/emotional/observable) becomes
-    `<profile>.<section>.<field>` dotted paths.
+    `<profile>.<section>.<field>` dotted paths. Choice-kind entries
+    are routed through `_build_choice_spec`.
+
+    Validates that the resolved profile name exists in live
+    `PROFILE_DELTAS` — unknown/typo profile section names raise
+    `InvalidParameterSpecError` instead of being silently accepted.
     """
     out: list[ParameterSpec] = []
     profile = _resolve_profile_name(yaml_key)
+    _validate_profile_exists(yaml_key, profile)
+
     if not isinstance(body, dict):
         raise InvalidParameterSpecError(
             f"{yaml_key}: body is not a dict; got {type(body).__name__}"
@@ -308,7 +430,25 @@ def _build_profile_delta_specs(
                 f"{yaml_key}.{section_name}: not a dict"
             )
         for field_name, entry in section_body.items():
-            if not isinstance(entry, dict) or "range" not in entry:
+            if not isinstance(entry, dict):
+                raise InvalidParameterSpecError(
+                    f"{yaml_key}.{section_name}.{field_name}: "
+                    f"entry must be a dict; got {entry!r}"
+                )
+            dotted = f"{profile}.{section_name}.{field_name}"
+
+            # Choice-kind branch
+            if entry.get("kind") == "choice":
+                context = f"{yaml_key}.{section_name}"
+                out.append(
+                    _build_choice_spec(
+                        context, field_name, entry, dotted, sources_out
+                    )
+                )
+                continue
+
+            # Numeric branch requires range
+            if "range" not in entry:
                 raise InvalidParameterSpecError(
                     f"{yaml_key}.{section_name}.{field_name}: "
                     f"missing 'range' or not a dict; got {entry!r}"
@@ -324,7 +464,6 @@ def _build_profile_delta_specs(
                 kind = "int"
             live = _live_default_for_profile(profile, section_name, field_name)
             default = _choose_default(entry.get("default"), live, lo, hi, kind)
-            dotted = f"{profile}.{section_name}.{field_name}"
             source_str = entry.get("source", "")
             if source_str:
                 sources_out[dotted] = source_str

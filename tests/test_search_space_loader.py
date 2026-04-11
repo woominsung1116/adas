@@ -193,15 +193,169 @@ base_emotional:
 
 
 # ==========================================================================
-# Choice parameter support
+# Choice parameter support (Phase 4.5 corrective pass)
 # ==========================================================================
 
 
-# NOTE: The current real YAML has no choice parameters. Choice kind would
-# require adding `kind: choice` + `choices: [...]` support in the loader.
-# Since the YAML structure doesn't use that, we don't add synthetic choice
-# support in this pass to avoid unused code paths. If needed later,
-# `_infer_kind` would read `entry.get("kind")` first.
+def test_choice_param_base_section_parses(tmp_path):
+    """A base_* entry with `kind: choice` + `choices: [...]` loads as
+    a choice ParameterSpec."""
+    fake_yaml = tmp_path / "choice_base.yaml"
+    fake_yaml.write_text(
+        """
+base_emotional:
+  mood_variant:
+    kind: choice
+    choices: ["calm", "anxious", "excited"]
+    default: "calm"
+    source: "synthetic test"
+""",
+        encoding="utf-8",
+    )
+    loaded = load_search_space(fake_yaml)
+    spec = [s for s in loaded.space.specs if s.name == "base_emotional.mood_variant"][0]
+    assert spec.kind == "choice"
+    assert spec.choices == ["calm", "anxious", "excited"]
+    assert spec.default == "calm"
+    assert spec.source == "synthetic test"
+
+
+def test_choice_param_default_falls_back_to_first_choice(tmp_path):
+    """Omitting `default:` on a choice entry → first choice is used."""
+    fake_yaml = tmp_path / "choice_default.yaml"
+    fake_yaml.write_text(
+        """
+base_emotional:
+  variant:
+    kind: choice
+    choices: ["alpha", "beta"]
+""",
+        encoding="utf-8",
+    )
+    loaded = load_search_space(fake_yaml)
+    spec = loaded.space.specs[0]
+    assert spec.kind == "choice"
+    assert spec.default == "alpha"
+
+
+def test_choice_param_missing_choices_raises(tmp_path):
+    fake_yaml = tmp_path / "choice_bad1.yaml"
+    fake_yaml.write_text(
+        """
+base_emotional:
+  variant:
+    kind: choice
+    # no choices key
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidParameterSpecError, match="requires 'choices' list"):
+        load_search_space(fake_yaml)
+
+
+def test_choice_param_empty_choices_raises(tmp_path):
+    fake_yaml = tmp_path / "choice_bad2.yaml"
+    fake_yaml.write_text(
+        """
+base_emotional:
+  variant:
+    kind: choice
+    choices: []
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidParameterSpecError, match="choices' list is empty"):
+        load_search_space(fake_yaml)
+
+
+def test_choice_param_choices_not_list_raises(tmp_path):
+    fake_yaml = tmp_path / "choice_bad3.yaml"
+    fake_yaml.write_text(
+        """
+base_emotional:
+  variant:
+    kind: choice
+    choices: "not a list"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidParameterSpecError, match="'choices' must be a list"):
+        load_search_space(fake_yaml)
+
+
+def test_choice_param_default_not_in_choices_raises(tmp_path):
+    fake_yaml = tmp_path / "choice_bad4.yaml"
+    fake_yaml.write_text(
+        """
+base_emotional:
+  variant:
+    kind: choice
+    choices: ["a", "b", "c"]
+    default: "z"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidParameterSpecError, match="not in choices"):
+        load_search_space(fake_yaml)
+
+
+def test_choice_param_in_profile_delta_section(tmp_path):
+    """Choice-kind entries also work inside `<profile>_deltas`."""
+    fake_yaml = tmp_path / "choice_delta.yaml"
+    fake_yaml.write_text(
+        """
+adhd_inattentive_deltas:
+  emotional:
+    stress_variant:
+      kind: choice
+      choices: ["low", "med", "high"]
+      default: "med"
+""",
+        encoding="utf-8",
+    )
+    loaded = load_search_space(fake_yaml)
+    spec = [s for s in loaded.space.specs][0]
+    assert spec.name == "adhd_inattentive.emotional.stress_variant"
+    assert spec.kind == "choice"
+    assert spec.default == "med"
+
+
+def test_choice_param_random_proposer_samples(tmp_path):
+    """RandomProposer must be able to sample a loaded choice spec."""
+    import random
+    from src.calibration.proposer import RandomProposer
+
+    fake_yaml = tmp_path / "choice_sample.yaml"
+    fake_yaml.write_text(
+        """
+base_emotional:
+  variant:
+    kind: choice
+    choices: ["a", "b", "c"]
+""",
+        encoding="utf-8",
+    )
+    loaded = load_search_space(fake_yaml)
+    proposer = RandomProposer(loaded.space, seed=42)
+    sampled_values = set()
+    for _ in range(50):
+        cfg = proposer.propose([])
+        val = cfg["base_emotional.variant"]
+        assert val in ["a", "b", "c"]
+        sampled_values.add(val)
+    # With 50 draws from 3 choices, all 3 should appear
+    assert sampled_values == {"a", "b", "c"}
+
+
+def test_choice_param_clip_coerces_invalid_to_first():
+    """SearchSpace.clip_config maps an unknown choice value to choices[0]."""
+    from src.calibration.proposer import ParameterSpec, SearchSpace
+
+    space = SearchSpace([
+        ParameterSpec("x", kind="choice", choices=["a", "b", "c"], default="a"),
+    ])
+    clipped = space.clip_config({"x": "z"})
+    assert clipped["x"] == "a"
 
 
 # ==========================================================================
@@ -370,3 +524,106 @@ def test_loaded_space_validates_default_config():
     default_cfg = loaded.space.default_config()
     ok, errs = loaded.space.validate_config(default_cfg)
     assert ok, f"default config is invalid: {errs}"
+
+
+# ==========================================================================
+# Profile validation (Phase 4.5 corrective pass)
+# ==========================================================================
+
+
+def test_unknown_profile_delta_section_raises(tmp_path):
+    """A `<profile>_deltas` section whose resolved profile name is not
+    in the live PROFILE_DELTAS must raise InvalidParameterSpecError at
+    load time, not silently produce dotted keys that fail downstream."""
+    fake_yaml = tmp_path / "typo_profile.yaml"
+    fake_yaml.write_text(
+        """
+made_up_profile_deltas:
+  cognitive:
+    att_bandwidth:
+      range: [-3, -1]
+      default: -2
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidParameterSpecError) as exc_info:
+        load_search_space(fake_yaml)
+    msg = str(exc_info.value)
+    assert "made_up_profile_deltas" in msg
+    assert "made_up_profile" in msg
+    assert "Known profiles" in msg
+
+
+def test_typo_profile_delta_section_raises(tmp_path):
+    """Common typo: `adhd_inatentive_deltas` (missing 't')."""
+    fake_yaml = tmp_path / "typo_adhd.yaml"
+    fake_yaml.write_text(
+        """
+adhd_inatentive_deltas:
+  cognitive:
+    att_bandwidth:
+      range: [-3, -1]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidParameterSpecError, match="adhd_inatentive"):
+        load_search_space(fake_yaml)
+
+
+def test_known_alias_still_resolves(tmp_path):
+    """`adhd_hyperactive_deltas` must still resolve to the canonical
+    `adhd_hyperactive_impulsive` profile via the alias map."""
+    fake_yaml = tmp_path / "alias.yaml"
+    fake_yaml.write_text(
+        """
+adhd_hyperactive_deltas:
+  cognitive:
+    impulse_override:
+      range: [0.25, 0.40]
+      default: 0.325
+""",
+        encoding="utf-8",
+    )
+    loaded = load_search_space(fake_yaml)
+    names = loaded.space.names()
+    assert "adhd_hyperactive_impulsive.cognitive.impulse_override" in names
+
+
+def test_all_canonical_profiles_load_without_validation_error(tmp_path):
+    """Every profile in PROFILE_DELTAS should be accepted by the loader
+    when used as a section name."""
+    from src.simulation import cognitive_agent as ca
+
+    # Build a minimal YAML with one delta entry per known profile
+    lines = []
+    for profile in sorted(ca.PROFILE_DELTAS.keys()):
+        # Respect alias direction: the YAML typically uses the canonical
+        # name directly (e.g. adhd_inattentive_deltas) so we just append
+        # _deltas to each.
+        lines.append(f"{profile}_deltas:")
+        lines.append("  emotional:")
+        lines.append("    frustration:")
+        lines.append("      range: [-0.1, 0.3]")
+    fake_yaml = tmp_path / "all_profiles.yaml"
+    fake_yaml.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Should load cleanly — every profile exists
+    loaded = load_search_space(fake_yaml)
+    assert len(loaded.space) == len(ca.PROFILE_DELTAS)
+
+
+def test_real_harness_profiles_validate():
+    """The real harness YAML's profile sections must validate clean."""
+    # Already covered by test_load_default_returns_non_empty_space, but this
+    # test is explicit about the validation gate.
+    loaded = load_default_search_space()
+    # If validation is working, all profile delta entries in loaded.space
+    # must correspond to dotted keys whose profile is in PROFILE_DELTAS.
+    from src.simulation import cognitive_agent as ca
+    for spec in loaded.space.specs:
+        parts = spec.name.split(".")
+        if len(parts) == 3:
+            # profile_delta path
+            profile = parts[0]
+            assert profile in ca.PROFILE_DELTAS, (
+                f"loaded spec {spec.name!r} references unknown profile {profile!r}"
+            )
