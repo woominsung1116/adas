@@ -27,7 +27,7 @@ from src.simulation.classroom_env_v2 import (
     DetailedObservation,
     StudentSummary,
 )
-from src.simulation.orchestrator_v2 import OrchestratorV2
+from src.simulation.orchestrator_v2 import OrchestratorV2, STRATEGIES
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +152,22 @@ def test_build_observations_ignores_detailed_observations():
 
 
 def test_build_observations_preserves_visible_behaviors_in_order():
+    """Real disruptive behaviors pass through in order; the
+    latent-fallback sentinel ``on_task`` is scrubbed; the
+    ``profile_hint`` is re-derived from behaviors, not passed
+    through from the classroom summary."""
     classroom_obs = _make_classroom_obs_with_detailed_leak()
     batch = build_observations_from_classroom(classroom_obs)
     by_id = batch.by_student_id()
+    # Real disruption survives and stays ordered.
     assert by_id["S01"].visible_behaviors == ("out_of_seat", "fidgeting")
-    assert by_id["S02"].visible_behaviors == ("on_task",)
-    assert by_id["S01"].profile_hint == "inattentive"
+    # Latent-fallback ``on_task`` is scrubbed out, leaving an empty
+    # observable set — the teacher has nothing to see this turn.
+    assert by_id["S02"].visible_behaviors == ()
+    # profile_hint is re-derived: S01 has disruptive behaviors,
+    # S02 has nothing observable.
+    assert by_id["S01"].profile_hint == "disruptive"
+    assert by_id["S02"].profile_hint == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -415,14 +425,31 @@ def test_default_strategy_uses_observation_proxies():
         make_obs(("out_of_seat", "calling_out"))
     ) == "break_offer"
 
-    # Profile hint "inattentive" → redirect_attention
-    assert orch._default_strategy(
+    # profile_hint is no longer an inattention input — the observation
+    # builder never emits "inattentive" anymore (it would require a
+    # latent-state read). The strategy ladder must not fall through
+    # on profile_hint alone: with no visible behavior the call should
+    # return SOMETHING valid, not crash.
+    # Hint "inattentive" with empty visible → random strategy (valid).
+    result = orch._default_strategy(
         make_obs((), hint="inattentive")
-    ) == "redirect_attention"
+    )
+    assert result in STRATEGIES
 
-    # Visible inattention behavior → redirect_attention
-    assert orch._default_strategy(
+    # The latent-fallback sentinel `seems_inattentive` is scrubbed by
+    # the observation builder before ever reaching decision code,
+    # but the _default_strategy helper takes raw observations, so we
+    # confirm it does NOT fire the inattention branch on the
+    # scrubbed sentinel — it should fall through to random.
+    result = orch._default_strategy(
         make_obs(("seems_inattentive",))
+    )
+    assert result in STRATEGIES
+    # An actually-observable low-arousal inattention behavior (if
+    # the visibility filter were widened) still routes to
+    # redirect_attention.
+    assert orch._default_strategy(
+        make_obs(("staring_out_window",))
     ) == "redirect_attention"
 
 
@@ -534,6 +561,210 @@ def test_sync_hypothesis_board_preserves_first_suspicion_on_repeat():
     h = orch.hypothesis_board.get("S03")
     assert h.first_suspicion_turn == 7  # only the first call sets it
     assert len(h.history) == 3
+
+
+# ---------------------------------------------------------------------------
+# Corrective pass: behavior-only teacher observation layer
+# ---------------------------------------------------------------------------
+
+
+def _make_classroom_obs_with_latent_fallbacks():
+    """Classroom observation whose summaries carry every latent-fallback
+    sentinel the classroom can emit — the teacher-observation builder
+    must scrub them before exposing visible_behaviors to the decision
+    path."""
+    summaries = [
+        # S01: only latent-fallback sentinels, no real behavior
+        StudentSummary(
+            student_id="S01",
+            profile_hint="inattentive",  # latent-derived, must be ignored
+            behaviors=["seems_inattentive"],
+            is_identified=False,
+            is_managed=False,
+            seat_row=0,
+            seat_col=0,
+        ),
+        # S02: real behavior + on_task fallback mixed in
+        StudentSummary(
+            student_id="S02",
+            profile_hint="typical",  # latent-derived, must be ignored
+            behaviors=["out_of_seat", "on_task"],
+            is_identified=False,
+            is_managed=False,
+            seat_row=0,
+            seat_col=1,
+        ),
+        # S03: only quiet fallback
+        StudentSummary(
+            student_id="S03",
+            profile_hint="disruptive",  # latent-derived, must be ignored
+            behaviors=["quiet"],
+            is_identified=False,
+            is_managed=False,
+            seat_row=0,
+            seat_col=2,
+        ),
+        # S04: already-identified student with real outburst
+        StudentSummary(
+            student_id="S04",
+            profile_hint="identified_adhd",
+            behaviors=["emotional_outburst"],
+            is_identified=True,
+            is_managed=False,
+            seat_row=0,
+            seat_col=3,
+        ),
+    ]
+    return ClassroomObservation(
+        turn=7,
+        day=1,
+        period=1,
+        subject="korean",
+        location="classroom",
+        student_summaries=summaries,
+        detailed_observations=[],
+        class_mood="neutral",
+        identified_adhd_ids=["S04"],
+        managed_ids=[],
+    )
+
+
+def test_build_observations_scrubs_latent_fallback_sentinels():
+    classroom_obs = _make_classroom_obs_with_latent_fallbacks()
+    batch = build_observations_from_classroom(classroom_obs)
+    by_id = batch.by_student_id()
+
+    # Latent fallbacks fully removed.
+    assert by_id["S01"].visible_behaviors == ()
+    assert by_id["S03"].visible_behaviors == ()
+    # Real behavior survives; mixed-in "on_task" sentinel scrubbed.
+    assert by_id["S02"].visible_behaviors == ("out_of_seat",)
+    # Real outburst always survives.
+    assert by_id["S04"].visible_behaviors == ("emotional_outburst",)
+
+    # No latent-fallback sentinel appears anywhere.
+    from src.simulation.teacher_observation import _LATENT_FALLBACK_BEHAVIORS
+    all_behaviors = set()
+    for obs in batch:
+        all_behaviors.update(obs.visible_behaviors)
+    assert not (all_behaviors & _LATENT_FALLBACK_BEHAVIORS)
+
+
+def test_build_observations_reroutes_profile_hint_behavior_derived_only():
+    classroom_obs = _make_classroom_obs_with_latent_fallbacks()
+    batch = build_observations_from_classroom(classroom_obs)
+    by_id = batch.by_student_id()
+
+    # Incoming profile_hints were "inattentive" / "typical" / "disruptive"
+    # / "identified_adhd" (latent-derived). Builder must ignore and re-derive:
+    # S01: no real behavior + not identified → unknown
+    assert by_id["S01"].profile_hint == "unknown"
+    # S02: has observable disruption → disruptive
+    assert by_id["S02"].profile_hint == "disruptive"
+    # S03: no real behavior + not identified → unknown (NOT "disruptive")
+    assert by_id["S03"].profile_hint == "unknown"
+    # S04: teacher has already flagged → identified_adhd
+    assert by_id["S04"].profile_hint == "identified_adhd"
+
+
+def test_profile_hint_vocabulary_is_behavior_only():
+    """The builder must never emit 'inattentive' / 'typical' — those
+    are only reachable via latent-state reads in the classroom's
+    original hint derivation."""
+    classroom_obs = _make_classroom_obs_with_latent_fallbacks()
+    batch = build_observations_from_classroom(classroom_obs)
+    emitted = {o.profile_hint for o in batch}
+    assert "inattentive" not in emitted
+    assert "typical" not in emitted
+    # Only the behavior-derived vocabulary is allowed.
+    assert emitted <= {"identified_adhd", "disruptive", "unknown"}
+
+
+def test_default_strategy_does_not_depend_on_latent_fallbacks():
+    """Behavior-level: passing only latent-fallback sentinels to
+    _default_strategy must NOT trigger the inattention branch —
+    those are no-signal in the new semantics."""
+    orch = OrchestratorV2(n_students=3, max_classes=1, seed=1)
+
+    def obs_of(*behaviors: str):
+        return StudentObservation(
+            student_id="X",
+            turn=1,
+            visible_behaviors=behaviors,
+            profile_hint="unknown",
+            seat_row=0,
+            seat_col=0,
+            is_identified=False,
+            is_managed=False,
+        )
+
+    # seems_inattentive (latent sentinel) must not route to
+    # redirect_attention. Falls through to random choice.
+    result = orch._default_strategy(obs_of("seems_inattentive"))
+    assert result in STRATEGIES and result != "redirect_attention"
+
+    # on_task sentinel likewise.
+    result = orch._default_strategy(obs_of("on_task"))
+    assert result in STRATEGIES
+
+
+def test_run_class_observations_never_expose_latent_fallbacks(short_class_result):
+    """Integration: a real run must never place a latent-fallback
+    sentinel into any hypothesis board evidence_behaviors dict."""
+    from src.simulation.teacher_observation import _LATENT_FALLBACK_BEHAVIORS
+    orch, _ = short_class_result
+    for sid, h in orch.hypothesis_board.items():
+        leaked = set(h.evidence_behaviors) & _LATENT_FALLBACK_BEHAVIORS
+        assert not leaked, (
+            f"{sid}: hypothesis board recorded latent-fallback sentinels "
+            f"{leaked} — teacher observation builder failed to scrub them"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Corrective pass: first_suspicion_turn semantics are "working suspicion set"
+# ---------------------------------------------------------------------------
+
+
+def test_first_suspicion_docs_use_working_suspicion_set_wording():
+    """Code comments across orchestrator, board, and metrics must
+    describe first_suspicion_turn consistently as entry into the
+    WORKING SUSPICION SET — not a strong threshold crossing."""
+    import inspect
+    from src.simulation import orchestrator_v2
+    from src.simulation import teacher_observation
+    from src.calibration import metrics
+
+    orch_src = inspect.getsource(orchestrator_v2)
+    # The misleading ">= 0.5" claim must be gone.
+    assert "adhd_indicator_score >= 0.5" not in orch_src
+    # The new wording must be present somewhere in the orchestrator.
+    assert "WORKING SUSPICION SET" in orch_src or "working suspicion set" in orch_src.lower()
+
+    # Hypothesis docstring on the board side.
+    board_src = inspect.getsource(teacher_observation)
+    assert "WORKING SUSPICION SET" in board_src or "working suspicion set" in board_src.lower()
+
+    # Calibration metric description.
+    metric_src = inspect.getsource(metrics)
+    assert "working suspicion set" in metric_src.lower()
+    # And the bad claim is gone from the metric docstring too.
+    assert "adhd_indicator_score >= 0.5" not in metric_src
+
+
+def test_first_suspicion_turn_matches_first_working_suspicion_entry():
+    """Regression: the board's first_suspicion_turn equals the
+    earliest turn the student appeared in _stream_suspicious,
+    which is populated by the refresh-time rule (score >= 0.15
+    with ≥3 obs, or > 0.10 soft)."""
+    orch = OrchestratorV2(n_students=8, max_classes=1, seed=42)
+    orch.classroom.MAX_TURNS = 300
+    orch.run_class()
+
+    for sid, first_turn in orch._stream_first_suspicion_turns.items():
+        h = orch.hypothesis_board.get(sid)
+        assert h is not None
+        assert h.first_suspicion_turn == first_turn
 
 
 def test_run_class_board_tracks_suspicion_score_movement():

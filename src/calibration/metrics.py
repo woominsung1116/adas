@@ -74,9 +74,16 @@ class ClassHistory:
     reports: list = field(default_factory=list)
     teacher_patience_log: list[float] | None = None
     intervention_outcomes: list[dict] = field(default_factory=list)
-    # Map of {student_id: first-suspicion turn} from the orchestrator's
-    # suspicion tracker (adhd_indicator_score >= 0.5 crossing). Preferred
-    # input for teacher.first_suspicion_turn_median when present.
+    # Map of {student_id: first-working-suspicion turn}. Populated by
+    # OrchestratorV2 when a student first enters the teacher's WORKING
+    # SUSPICION SET (`_stream_suspicious`). Entry rule: refresh-time
+    # `adhd_indicator_score >= 0.15` with at least 3 observations
+    # (strong entry), or `> 0.10` (soft entry, no hypothesis tracker
+    # created). This is "teacher started paying closer attention",
+    # NOT a strong diagnostic threshold crossing. Preferred input for
+    # `teacher.first_suspicion_turn_median` when present; the target
+    # range in `.harness/naturalness_targets.yaml` is calibrated
+    # against this working-set semantic, not a stricter threshold.
     first_suspicion_turns: dict[str, int] = field(default_factory=dict)
 
 
@@ -379,16 +386,28 @@ def _behavior_seat_leaving_ratio(bundle: CalibrationResultBundle) -> float:
 
 
 def _teacher_first_suspicion_turn_median(bundle: CalibrationResultBundle) -> float:
-    """Median turn at which teacher first began suspecting any ADHD student.
+    """Median turn at which the teacher first paid closer attention
+    to any ADHD student.
 
-    Prefers the real suspicion signal (orchestrator's `first_suspicion_turns`
-    map, populated when a student first crosses the adhd_indicator_score
-    suspicion threshold). Falls back to `identify_adhd` action timing for
-    histories that lack suspicion data (e.g., legacy or synthetic bundles).
+    "First suspicion" here means **first entry into the teacher's
+    working suspicion set** — NOT a strong diagnostic threshold
+    crossing. The working set is
+    `OrchestratorV2._stream_suspicious`, populated at every
+    refresh turn when `adhd_indicator_score >= 0.15` with at
+    least 3 observations (strong entry) or `> 0.10` (soft entry).
+    The calibration target range in
+    `.harness/naturalness_targets.yaml` is written against this
+    working-set semantic, not a stricter threshold.
 
-    "First suspicion" is taken per-class as the earliest turn at which any
-    true-ADHD student entered suspicion. The median across classes is
-    returned.
+    Prefers the real signal from
+    `ClassHistory.first_suspicion_turns` when present. Falls
+    back to `identify_adhd` action timing only for histories
+    that lack working-suspicion data (e.g. legacy or synthetic
+    bundles).
+
+    Taken per-class as the earliest working-suspicion turn among
+    true-ADHD students in that class, then the median across
+    classes.
     """
     first_turns: list[int] = []
     for h in bundle.histories:

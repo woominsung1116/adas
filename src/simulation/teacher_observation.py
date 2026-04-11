@@ -45,6 +45,36 @@ from typing import Any, Iterable
 # ---------------------------------------------------------------------------
 
 
+#: Sentinel "behaviors" that ``ClassroomV2._visible_behaviors`` emits
+#: when a student exhibits no high-visibility behavior this turn.
+#: These strings are derived from latent state thresholds
+#: (``attention``, ``compliance``) rather than from anything the
+#: teacher could plausibly observe, so the teacher observation
+#: layer scrubs them before exposing visible_behaviors to the
+#: decision path. They are the quiet leaks the builder closes.
+_LATENT_FALLBACK_BEHAVIORS: frozenset[str] = frozenset({
+    "seems_inattentive",   # fallback when attention < 0.3
+    "on_task",             # fallback when compliance > 0.7
+    "quiet",               # fallback otherwise
+})
+
+
+#: High-visibility disruptive behaviors (mirrors
+#: ``ClassroomV2._visible_behaviors`` high_vis set). A student
+#: whose visible behaviors include any of these is observably
+#: disruptive and gets a behavior-derived ``profile_hint`` of
+#: ``"disruptive"``.
+_OBSERVABLE_DISRUPTIVE_BEHAVIORS: frozenset[str] = frozenset({
+    "out_of_seat",
+    "calling_out",
+    "interrupting",
+    "excessive_talking",
+    "running_in_classroom",
+    "fidgeting",
+    "emotional_outburst",
+})
+
+
 #: Fields that describe latent student state and MUST NEVER appear in the
 #: keys of a serialized ``StudentObservation``. Enforced by
 #: ``test_teacher_observation`` via structural assertion.
@@ -233,11 +263,21 @@ class TeacherHypothesis:
       suspicion_score:       last-updated suspicion score in [0, 1]
       working_label:         current working hypothesis category,
                              drawn from ``HYPOTHESIS_LABELS``
-      first_suspicion_turn:  turn when suspicion_score first crossed
-                             the orchestrator's suspicion threshold;
-                             None until then. This is the authoritative
-                             first-suspicion record (the orchestrator
-                             previously kept a parallel dict).
+      first_suspicion_turn:  turn at which this student first entered
+                             the teacher's WORKING SUSPICION SET —
+                             i.e. the first call to
+                             ``record_suspicion`` whose ``score``
+                             met the supplied ``threshold``. The
+                             orchestrator calls this with
+                             ``threshold=0.0`` so ANY recorded
+                             suspicion counts, matching the
+                             refresh-time ``_stream_suspicious``
+                             population rule (strong: ``score >= 0.15``
+                             with ≥3 obs, or soft: ``> 0.10``).
+                             NOTE: this is "teacher started paying
+                             closer attention", NOT a strong diagnostic
+                             threshold crossing. None until the
+                             first recorded entry.
       last_observation_turn: most recent turn this student produced
                              an observation entry
       n_observations:        cumulative count of observations that
@@ -406,6 +446,32 @@ class TeacherHypothesisBoard:
 # ---------------------------------------------------------------------------
 
 
+def _derive_profile_hint(
+    visible_behaviors: tuple[str, ...],
+    is_identified: bool,
+) -> str:
+    """Compute a behavior-only ``profile_hint`` for a student.
+
+    Rules:
+      * A student the teacher has already flagged as ADHD →
+        ``"identified_adhd"``. This is a teacher-side flag, not
+        latent truth.
+      * Any observable disruptive behavior → ``"disruptive"``.
+      * Otherwise → ``"unknown"``. The teacher layer refuses to
+        guess an inattentive / typical label from latent scalars.
+
+    The classroom's original ``profile_hint`` (derived from latent
+    ``escalation_risk`` / ``attention``) is ignored on purpose —
+    this function is the single source of truth for the
+    observation-layer hint.
+    """
+    if is_identified:
+        return "identified_adhd"
+    if any(b in _OBSERVABLE_DISRUPTIVE_BEHAVIORS for b in visible_behaviors):
+        return "disruptive"
+    return "unknown"
+
+
 def build_observations_from_classroom(classroom_obs: Any) -> TeacherObservationBatch:
     """Project a ``ClassroomObservation`` into a partial-observation batch.
 
@@ -416,10 +482,27 @@ def build_observations_from_classroom(classroom_obs: Any) -> TeacherObservationB
     and ``emotional_cues`` which would leak latent truth into the
     teacher's view.
 
-    This function is the single enforcement point for partial
-    observability: if a future caller tries to read latent state
-    for the teacher, they will have to go around this boundary and
-    it will be obvious in review.
+    Additional scrubbing (Phase 6 slice 1 corrective pass):
+
+    1. **Latent-fallback sentinels removed.**
+       ``ClassroomV2._visible_behaviors`` emits
+       ``"seems_inattentive"`` / ``"on_task"`` / ``"quiet"`` when a
+       student has no high-visibility behaviors this turn —
+       derived from latent ``attention`` / ``compliance``
+       thresholds. These are filtered out here so the decision
+       path only sees actually-observable behavior strings.
+
+    2. **``profile_hint`` re-derived from visible behaviors.**
+       The incoming hint (derived from
+       ``escalation_risk`` / ``attention``) is ignored. The
+       builder recomputes a hint from visible behaviors and the
+       teacher-side ``is_identified`` flag via
+       ``_derive_profile_hint``.
+
+    The boundary becomes: the teacher only sees real observed
+    behaviors and teacher-side flags. If a future caller wants
+    a richer hint, they must add a behavior-only derivation
+    rule — they cannot fall through to a latent scalar.
     """
     turn = int(getattr(classroom_obs, "turn", 0))
     class_mood = str(getattr(classroom_obs, "class_mood", "neutral"))
@@ -427,15 +510,20 @@ def build_observations_from_classroom(classroom_obs: Any) -> TeacherObservationB
 
     observations: list[StudentObservation] = []
     for s in summaries:
+        raw = tuple(s.behaviors or ())
+        # Scrub latent-derived fallback sentinels.
+        scrubbed = tuple(b for b in raw if b not in _LATENT_FALLBACK_BEHAVIORS)
+        is_identified = bool(s.is_identified)
+        hint = _derive_profile_hint(scrubbed, is_identified)
         observations.append(
             StudentObservation(
                 student_id=str(s.student_id),
                 turn=turn,
-                visible_behaviors=tuple(s.behaviors or ()),
-                profile_hint=str(s.profile_hint),
+                visible_behaviors=scrubbed,
+                profile_hint=hint,
                 seat_row=int(s.seat_row),
                 seat_col=int(s.seat_col),
-                is_identified=bool(s.is_identified),
+                is_identified=is_identified,
                 is_managed=bool(s.is_managed),
             )
         )

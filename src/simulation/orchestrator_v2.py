@@ -530,8 +530,16 @@ _HYPOTHESIS_TEST_STRATEGIES: list[str] = [
 class HypothesisTracker:
     """Track hypothesis-verification tests for a suspicious student.
 
+    A tracker is created when a student first enters the teacher's
+    WORKING SUSPICION SET — see ``_decide_action_rule_based`` Phase
+    2a, which adds a student to ``_stream_suspicious`` when
+    ``adhd_indicator_score >= 0.15`` with at least 3 observations
+    (strong entry) or ``> 0.10`` (soft entry, no tracker created).
+    This is deliberately loose — it is "teacher started paying
+    closer attention", not a strong diagnostic threshold.
+
     Phase 2 sub-phases:
-      2a: Flag as suspicious (adhd_indicator_score >= 0.5, observations >= 5)
+      2a: Enter working suspicion set (see above)
       2b: Apply differential interventions and record compliance deltas
       2c: After 3+ different tests, infer likely profile from response pattern
     """
@@ -607,10 +615,16 @@ _DISRUPTIVE_VISIBLE_BEHAVIORS: frozenset[str] = frozenset({
     "emotional_outburst",
 })
 
-#: Behaviors that signal an attention breakdown the teacher can see
-#: (low-arousal inattention rather than high-arousal disruption).
+#: Observable low-arousal inattention behaviors. Note that the
+#: current ClassroomV2._visible_behaviors filter passes NONE of
+#: these through (the high-visibility set is all high-arousal
+#: disruption). They are kept here so that if a future pass
+#: widens the visibility filter, the strategy ladder already
+#: recognizes them without another edit. The deliberately-latent
+#: sentinels ``seems_inattentive`` / ``on_task`` / ``quiet`` are
+#: NOT in this set — they are scrubbed by the teacher observation
+#: builder before the decision path ever sees them.
 _INATTENTIVE_VISIBLE_BEHAVIORS: frozenset[str] = frozenset({
-    "seems_inattentive",
     "staring_out_window",
     "daydreaming",
     "off_task",
@@ -779,10 +793,16 @@ class OrchestratorV2:
         #   teacher.patience_end_of_day_vs_start_ratio
         # - intervention_outcomes: per-intervention pre/post compliance deltas;
         #   used by intervention.empathic_compliance_gain
-        # - first_suspicion_turns: turn at which each ADHD student first
-        #   entered the suspicion tracker (adhd_indicator_score >= 0.5);
-        #   used by teacher.first_suspicion_turn_median (more accurate than
-        #   identify_adhd fallback)
+        # - first_suspicion_turns: turn at which each student first
+        #   entered the teacher's WORKING SUSPICION SET. The working
+        #   set is the orchestrator's refresh-time structure
+        #   `_stream_suspicious`, populated when
+        #   `adhd_indicator_score >= 0.15` with at least 3 observations
+        #   (strong entry) OR `> 0.10` (soft entry, no tracker).
+        #   Semantic: this is "teacher started paying closer attention",
+        #   not a strong diagnostic threshold crossing. Used by
+        #   calibration metric `teacher.first_suspicion_turn_median`
+        #   whose docstring now matches this definition.
         self._stream_patience_log: list[float] = []
         self._stream_intervention_outcomes: list[dict] = []
         self._stream_first_suspicion_turns: dict[str, int] = {}
@@ -820,10 +840,19 @@ class OrchestratorV2:
                 teacher_batch=teacher_batch,
             )
 
-            # 1b. Detect newly-suspicious students and keep the legacy
-            # first-suspicion dict in sync with the hypothesis board.
-            # The board is authoritative; the legacy dict is kept only
-            # so downstream metric code that reads it keeps working.
+            # 1b. Detect students that just entered the teacher's
+            # WORKING SUSPICION SET and pin their first-working-
+            # suspicion turn. "Working suspicion set" here is
+            # deliberately loose — it corresponds to
+            # `_stream_suspicious` entries produced by the
+            # refresh-time rule (score >= 0.15 with ≥3 obs, or
+            # > 0.10 soft). This is NOT a strong diagnostic
+            # threshold; it is "teacher started paying closer
+            # attention" and is calibrated against the target
+            # range in `.harness/naturalness_targets.yaml`
+            # (`teacher_first_suspicion_turn`, 50-120 turns).
+            # The legacy dict is kept in sync with the
+            # authoritative hypothesis board.
             new_suspicious = set(self._stream_suspicious.keys()) - prev_suspicious_ids
             for sid in new_suspicious:
                 if sid not in self._stream_first_suspicion_turns:
@@ -1787,28 +1816,31 @@ class OrchestratorV2:
         student state directly; this replacement uses only the
         partial-observation layer.
 
-        Decision ladder:
+        Decision ladder (behavior-only, no ``profile_hint`` reads
+        since the teacher observation builder now emits only
+        ``identified_adhd`` / ``disruptive`` / ``unknown`` and
+        those are not informative for strategy selection):
           1. visible ``emotional_outburst`` with a low-empathy
              teacher → ``firm_boundary`` (legacy misread branch,
              reproduced with observables)
           2. visible ``emotional_outburst`` →
              ``empathic_acknowledgment``
           3. any disruptive visible behavior → ``break_offer``
-          4. any inattentive visible behavior OR
-             ``profile_hint == "inattentive"`` → ``redirect_attention``
+          4. any inattentive visible behavior →
+             ``redirect_attention`` (currently unreachable under
+             the standard ClassroomV2 visibility filter; kept
+             future-proof)
           5. nothing observable → random strategy
         """
         visible: tuple[str, ...] = tuple()
-        profile_hint: str = ""
         if observable is not None:
             visible = tuple(getattr(observable, "visible_behaviors", ()) or ())
-            profile_hint = str(getattr(observable, "profile_hint", "") or "")
 
         has_outburst = "emotional_outburst" in visible
         has_disruption = any(b in _DISRUPTIVE_VISIBLE_BEHAVIORS for b in visible)
         has_inattention = any(
             b in _INATTENTIVE_VISIBLE_BEHAVIORS for b in visible
-        ) or profile_hint == "inattentive"
+        )
 
         # Low empathy: misreads visible outburst as defiance,
         # escalates to firm_boundary.
