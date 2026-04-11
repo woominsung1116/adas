@@ -350,6 +350,10 @@ try:
         observable_response_label,
         observable_response_effect,
     )
+    from src.simulation.teacher_noise import (
+        TeacherNoiseConfig,
+        apply_observation_noise,
+    )
 except ImportError as e:
     raise ImportError(
         f"teacher_observation not found or broken: {e}. "
@@ -683,6 +687,7 @@ class OrchestratorV2:
         phase_config: PhaseConfig | None = None,
         feedback_rate: float = 0.30,
         feedback_delay_turns: int = 1,
+        teacher_noise_config: TeacherNoiseConfig | None = None,
     ):
         self.log = InteractionLog()
         self.classroom = ClassroomV2(
@@ -705,9 +710,28 @@ class OrchestratorV2:
         self.max_classes = max_classes
         self.feedback_rate = feedback_rate
         self._rng = random.Random(seed)
+        # Stored for deterministic derivation of auxiliary RNGs
+        # (e.g. the Phase 6 slice 5 teacher noise RNG) without
+        # consuming master RNG state.
+        self._stream_master_seed: int = int(seed) if seed is not None else 0
         self.teacher_emotions = TeacherEmotionalState()
         # Per-class hypothesis trackers, reset each class
         self._hypothesis_trackers: dict[str, HypothesisTracker] = {}
+
+        # Phase 6 slice 5: teacher perception noise (dropout +
+        # confusion on observable behaviors). Default is a no-op
+        # config, so existing behavior is preserved bit-for-bit
+        # unless the caller explicitly opts in. A dedicated RNG
+        # seeded from the master seed keeps noisy runs
+        # reproducible and independent from the simulator's
+        # other RNGs.
+        self.teacher_noise_config: TeacherNoiseConfig = (
+            teacher_noise_config
+            if teacher_noise_config is not None
+            else TeacherNoiseConfig()
+        )
+        noise_seed = (seed if seed is not None else 0) ^ 0x6F15E6
+        self._teacher_noise_rng: random.Random = random.Random(noise_seed)
 
         # Phase 6 slice 3: delayed feedback for memory commits.
         # Observations are staged each turn and committed to teacher
@@ -835,6 +859,17 @@ class OrchestratorV2:
         # fresh run. Each class starts with an empty queue.
         self._feedback_queue = FeedbackDelayQueue()
 
+        # Phase 6 slice 5: re-seed the teacher noise RNG from the
+        # stored master seed plus the class counter so successive
+        # classes produce independent but reproducible noisy
+        # traces. Derivation is pure — it does NOT consume the
+        # master RNG, which would shift downstream state and
+        # break existing test determinism.
+        _master_noise_seed = (self._stream_master_seed or 0) ^ 0x6F15E6
+        self._teacher_noise_rng = random.Random(
+            _master_noise_seed ^ (self.class_count + 1)
+        )
+
         for turn in range(1, self.classroom.MAX_TURNS + 1):
             self.memory.advance_turn()
             self._stream_final_turn = turn
@@ -860,7 +895,16 @@ class OrchestratorV2:
             # into an explicit partial-observation batch. The teacher
             # decision path and hypothesis board BOTH consume this
             # batch instead of reading latent student state.
-            teacher_batch = build_observations_from_classroom(self._stream_obs)
+            # Phase 6 slice 5: pass the noise config + dedicated
+            # RNG so dropout / confusion apply to the teacher's
+            # observation of this turn. When the config is the
+            # default (no-op), the builder returns bit-identical
+            # output and does not consume any RNG state.
+            teacher_batch = build_observations_from_classroom(
+                self._stream_obs,
+                noise_config=self.teacher_noise_config,
+                noise_rng=self._teacher_noise_rng,
+            )
             self._current_teacher_obs = teacher_batch
             self.hypothesis_board.record_batch(teacher_batch)
 
@@ -913,11 +957,23 @@ class OrchestratorV2:
             # ``_DISRUPTIVE_VISIBLE_BEHAVIORS`` — the same set the
             # teacher observation builder exposes — so no latent
             # scalars are captured.
+            #
+            # Phase 6 slice 5: the snapshot is *also* passed
+            # through the teacher noise layer. The pre snapshot
+            # represents "what the teacher thinks they saw before
+            # acting" — so dropout and confusion apply here too,
+            # not just to ``TeacherObservationBatch``. No-op
+            # when noise is disabled.
             pre_step_visible: dict[str, tuple[str, ...]] = {}
             for _s in self.classroom.students:
                 _vis = getattr(_s, "exhibited_behaviors", None) or []
-                pre_step_visible[_s.student_id] = tuple(
+                _filtered = tuple(
                     b for b in _vis if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+                )
+                pre_step_visible[_s.student_id] = apply_observation_noise(
+                    _filtered,
+                    self._teacher_noise_rng,
+                    self.teacher_noise_config,
                 )
 
             # 2. Execute in environment
@@ -2010,9 +2066,19 @@ class OrchestratorV2:
         # as ``_DISRUPTIVE_VISIBLE_BEHAVIORS`` the teacher
         # observation builder uses. This is the post side of the
         # observable-response comparison.
+        #
+        # Phase 6 slice 5: teacher perception noise applies here
+        # too. Dropout / confusion on the post snapshot models a
+        # teacher who may miss a residual disruption at commit
+        # time. No-op when noise is disabled.
         post_raw = getattr(student_obj, "exhibited_behaviors", None) or []
-        post_visible = tuple(
+        post_filtered = tuple(
             b for b in post_raw if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+        )
+        post_visible = apply_observation_noise(
+            post_filtered,
+            self._teacher_noise_rng,
+            self.teacher_noise_config,
         )
 
         label = observable_response_label(
@@ -2072,8 +2138,18 @@ class OrchestratorV2:
             if student_obj is not None:
                 pre_visible = pre_step_visible.get(action.student_id, ())
                 post_raw = getattr(student_obj, "exhibited_behaviors", None) or []
-                post_visible = tuple(
+                post_filtered = tuple(
                     b for b in post_raw if b in _DISRUPTIVE_VISIBLE_BEHAVIORS
+                )
+                # Phase 6 slice 5: apply perception noise to the
+                # POST snapshot as well. The teacher's post-action
+                # observation is an independent perception event
+                # and may drop / confuse behaviors differently
+                # from the pre snapshot.
+                post_visible = apply_observation_noise(
+                    post_filtered,
+                    self._teacher_noise_rng,
+                    self.teacher_noise_config,
                 )
                 effect = observable_response_effect(pre_visible, post_visible)
                 self._hypothesis_trackers[action.student_id].record_test(
@@ -2106,7 +2182,19 @@ class OrchestratorV2:
                 if action.student_id == sid and action.strategy:
                     track.strategies_applied.append(action.strategy)
 
-            translated = _translate_behaviors(behaviors)
+            # Phase 6 slice 5: apply teacher perception noise to
+            # the behaviors BEFORE they reach memory.observe /
+            # the queue. This is a separate perception event from
+            # the ``build_observations_from_classroom`` call in
+            # the stream loop, so the memory encoding may drop or
+            # confuse different behaviors than the observation
+            # batch did. No-op when noise is disabled.
+            noisy_behaviors = apply_observation_noise(
+                behaviors,
+                self._teacher_noise_rng,
+                self.teacher_noise_config,
+            )
+            translated = _translate_behaviors(noisy_behaviors)
             self.memory.observe(
                 student_id=sid,
                 behaviors=translated,
@@ -2141,7 +2229,15 @@ class OrchestratorV2:
 
             # Only feed to memory if this student has visible disruptive behaviors
             if behaviors and any(b not in ("on_task", "listening", "writing") for b in behaviors):
-                translated = _translate_behaviors(behaviors)
+                # Phase 6 slice 5: apply perception noise to the
+                # summary path as well, for the same reason as
+                # the detailed-observation branch above.
+                noisy_behaviors = apply_observation_noise(
+                    behaviors,
+                    self._teacher_noise_rng,
+                    self.teacher_noise_config,
+                )
+                translated = _translate_behaviors(noisy_behaviors)
                 self.memory.observe(
                     student_id=sid,
                     behaviors=translated,

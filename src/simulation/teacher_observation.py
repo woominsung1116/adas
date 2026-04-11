@@ -572,7 +572,12 @@ def _derive_profile_hint(
     return "unknown"
 
 
-def build_observations_from_classroom(classroom_obs: Any) -> TeacherObservationBatch:
+def build_observations_from_classroom(
+    classroom_obs: Any,
+    *,
+    noise_config: Any = None,
+    noise_rng: Any = None,
+) -> TeacherObservationBatch:
     """Project a ``ClassroomObservation`` into a partial-observation batch.
 
     Reads ONLY from ``student_summaries`` — the already
@@ -608,11 +613,24 @@ def build_observations_from_classroom(classroom_obs: Any) -> TeacherObservationB
     class_mood = str(getattr(classroom_obs, "class_mood", "neutral"))
     summaries = getattr(classroom_obs, "student_summaries", []) or []
 
+    # Phase 6 slice 5: if the caller supplied a teacher noise
+    # config + rng, apply dropout / confusion to the scrubbed
+    # visible behaviors AFTER the latent-fallback scrub but
+    # BEFORE hypothesis / hint derivation. The noise helper is a
+    # no-op when both probabilities are zero, so the default
+    # path is bit-identical to the previous build.
+    from .teacher_noise import apply_observation_noise, TeacherNoiseConfig  # local import avoids cycles
+
     observations: list[StudentObservation] = []
     for s in summaries:
         raw = tuple(s.behaviors or ())
         # Scrub latent-derived fallback sentinels.
         scrubbed = tuple(b for b in raw if b not in _LATENT_FALLBACK_BEHAVIORS)
+        # Apply teacher perception noise if configured.
+        if noise_config is not None and noise_rng is not None:
+            scrubbed = apply_observation_noise(
+                scrubbed, noise_rng, noise_config
+            )
         is_identified = bool(s.is_identified)
         hint = _derive_profile_hint(scrubbed, is_identified)
         observations.append(
