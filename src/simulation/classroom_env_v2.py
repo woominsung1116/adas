@@ -220,6 +220,48 @@ MANAGED_CONSECUTIVE = 25  # ~1 week of sustained improvement
 #: either the sort or the attended set.
 _MAX_STUDENT_EVENTS: int = 12
 
+
+#: Phase 6 slice 16: map each teacher action_type to a coarse,
+#: student-visible description. Returns ``None`` for actions the
+#: simulator treats as internal bookkeeping (e.g. ``identify_adhd``,
+#: ``generate_report``) — those are suppressed from the student
+#: perceive stream entirely because the simulator has no public
+#: externalization for them and feeding them in would be equivalent
+#: to claiming students perceived the teacher's hidden diagnostic
+#: decision. A catch-all default keeps unknown future action types
+#: conservatively announced as "teacher acted" without leaking
+#: internal reasoning.
+_PUBLIC_TEACHER_SUMMARY: dict[str, str | None] = {
+    "individual_intervention": "teacher intervened with student",
+    "private_correction": "teacher corrected student privately",
+    "public_correction": "teacher corrected student in front of class",
+    "class_instruction": "teacher addressed the class",
+    "observe": "teacher watched student",
+    "wait": "teacher paused",
+    # Internal bookkeeping — never externalized to the class.
+    "identify_adhd": None,
+    "generate_report": None,
+}
+
+
+def _public_teacher_summary(action_type: str | None) -> str | None:
+    """Return a student-visible summary of a teacher action.
+
+    * Known public actions → coarse descriptive string (no
+      hypothesis labels, no confidence values, no thresholds).
+    * Known internal actions (``identify_adhd``,
+      ``generate_report``) → ``None``; callers must suppress
+      the event entirely.
+    * Unknown action types → generic ``"teacher acted"`` so a
+      future added action type does not leak by accident.
+    """
+    if action_type is None:
+        return "teacher acted"
+    key = str(action_type)
+    if key in _PUBLIC_TEACHER_SUMMARY:
+        return _PUBLIC_TEACHER_SUMMARY[key]
+    return "teacher acted"
+
 # ADHD behavior pools (mirrored from multi_student_env for consistency)
 _ADHD_BEHAVIORS: dict[str, list[str]] = {
     "adhd_inattentive": [
@@ -1435,22 +1477,35 @@ class ClassroomV2:
         # A pure passive observation sweep produces no perceivable
         # event — matching the pre-slice behavior for test harnesses
         # that drive the environment with generic "observe" actions.
+        #
+        # Phase 6 slice 16: the student-visible description is a
+        # COARSE summary from ``_public_teacher_summary``. The
+        # raw ``teacher_action.reasoning`` string (which carries
+        # internal hypothesis labels, confidence values, and
+        # rule-out logic) is NEVER copied into the student event
+        # dict. Internal bookkeeping actions (``identify_adhd``,
+        # ``generate_report``) produce a ``None`` summary and
+        # are suppressed entirely — the simulator has no public
+        # externalization for them, so students cannot perceive
+        # them.
         action_type = str(teacher_action.action_type or "observe")
         directed = teacher_action.student_id is not None
         is_passive_sweep = (action_type == "observe") and not directed
         if not is_passive_sweep:
-            teacher_event_target = (
-                teacher_action.student_id
-                if teacher_action.student_id
-                else "class"
-            )
-            events.append({
-                "actor": "teacher",
-                "target": teacher_event_target,
-                "action": action_type,
-                "description": str(teacher_action.reasoning or ""),
-                "type": "teacher_action",
-            })
+            public_summary = _public_teacher_summary(action_type)
+            if public_summary is not None:
+                teacher_event_target = (
+                    teacher_action.student_id
+                    if teacher_action.student_id
+                    else "class"
+                )
+                events.append({
+                    "actor": "teacher",
+                    "target": teacher_event_target,
+                    "action": action_type,
+                    "description": public_summary,
+                    "type": "teacher_action",
+                })
 
         # 2. Previous turn's peer interaction events.
         # Only SALIENT event types reach the student perceive stream
@@ -1482,11 +1537,31 @@ class ClassroomV2:
                 )
                 if not is_salient:
                     continue
+                raw_action = str(getattr(ev, "action", "") or "")
+                # Phase 6 slice 16: sanitize prev-turn teacher
+                # events. The interaction log writes the raw
+                # teacher ``reasoning`` string into the event's
+                # ``content`` field for post-hoc analysis. That
+                # string may contain hypothesis / confidence /
+                # threshold text that students must not see, so
+                # the student-facing projection replaces
+                # ``content`` with a coarse public summary
+                # derived from ``ev.action``. Internal bookkeeping
+                # actions (``identify_adhd``, ``generate_report``)
+                # return a ``None`` summary and the event is
+                # suppressed entirely.
+                if actor == "teacher":
+                    public_summary = _public_teacher_summary(raw_action)
+                    if public_summary is None:
+                        continue
+                    description = public_summary
+                else:
+                    description = str(getattr(ev, "content", "") or "")
                 events.append({
                     "actor": actor,
                     "target": str(getattr(ev, "target", "") or ""),
-                    "action": str(getattr(ev, "action", "") or ""),
-                    "description": str(getattr(ev, "content", "") or ""),
+                    "action": raw_action,
+                    "description": description,
                     "type": etype or "peer",
                 })
 

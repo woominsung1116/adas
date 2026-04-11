@@ -269,6 +269,166 @@ def test_student_memory_is_sparse_under_pure_passive_sweeps():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Phase 6 slice 16: teacher-private reasoning must not leak
+# ---------------------------------------------------------------------------
+
+
+def test_same_turn_event_description_does_not_leak_reasoning():
+    """The helper must replace `teacher_action.reasoning` with a
+    coarse public summary. Internal hypothesis / confidence /
+    threshold text must never reach the student event dict."""
+    env = ClassroomV2(n_students=4, seed=7)
+    env.reset()
+    leaky_reasoning = (
+        "hypothesis=adhd_inattentive, confidence=0.87, threshold=0.40, "
+        "experience_boost=0.12"
+    )
+    action = TeacherAction(
+        action_type="individual_intervention",
+        student_id=env.students[0].student_id,
+        strategy="break_offer",
+        reasoning=leaky_reasoning,
+    )
+    events = env._build_current_events_for_students(action)
+    assert len(events) >= 1
+    teacher_event = events[0]
+    desc = teacher_event["description"]
+    # Exact forbidden substrings from the leaky reasoning.
+    forbidden = [
+        "hypothesis",
+        "confidence",
+        "threshold",
+        "experience_boost",
+        "adhd_inattentive",
+        "0.87",
+        "0.40",
+    ]
+    for bad in forbidden:
+        assert bad not in desc, f"leaked {bad!r} into student event"
+    # Known sanitized summary
+    assert desc == "teacher intervened with student"
+
+
+def test_prev_turn_teacher_log_event_description_is_sanitized():
+    """A teacher event written into the interaction log (with
+    `content=action.reasoning`) must be projected with a
+    sanitized description when it reappears as a prev-turn
+    event in the student payload."""
+    env = ClassroomV2(n_students=4, seed=7)
+    env.reset()
+    env.turn = 1
+    env.log.record(InteractionEvent(
+        class_id=env.class_id,
+        turn=1,
+        actor="teacher",
+        target=env.students[0].student_id,
+        event_type="teacher_correct_private",
+        action="private_correction",
+        content=(
+            "hypothesis=adhd_combined, confidence=0.92, "
+            "threshold=0.35, internal notes"
+        ),
+    ))
+    env.turn = 2
+    action = TeacherAction(action_type="observe", student_id=None)
+    events = env._build_current_events_for_students(action)
+    teacher_events = [e for e in events if e.get("actor") == "teacher"]
+    assert len(teacher_events) == 1
+    desc = teacher_events[0]["description"]
+    for bad in (
+        "hypothesis", "confidence", "threshold",
+        "adhd_combined", "0.92", "0.35", "internal notes",
+    ):
+        assert bad not in desc
+    assert desc == "teacher corrected student privately"
+
+
+def test_unknown_action_type_falls_back_to_generic_summary():
+    env = ClassroomV2(n_students=4, seed=7)
+    env.reset()
+    action = TeacherAction(
+        action_type="brand_new_action",
+        student_id=env.students[0].student_id,
+        reasoning="private notes",
+    )
+    events = env._build_current_events_for_students(action)
+    assert events[0]["description"] == "teacher acted"
+    assert "private notes" not in events[0]["description"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 slice 16: identify_adhd must not reach student events
+# ---------------------------------------------------------------------------
+
+
+def test_same_turn_identify_adhd_is_suppressed():
+    env = ClassroomV2(n_students=4, seed=7)
+    env.reset()
+    action = TeacherAction(
+        action_type="identify_adhd",
+        student_id=env.students[0].student_id,
+        reasoning="internal diagnostic",
+    )
+    events = env._build_current_events_for_students(action)
+    for e in events:
+        assert e.get("action") != "identify_adhd"
+        assert e.get("actor") != "teacher"  # no teacher event at all
+    # Public positive: the SAME helper still emits a teacher event
+    # for a normal directed action on the same env.
+    action2 = TeacherAction(
+        action_type="individual_intervention",
+        student_id=env.students[0].student_id,
+    )
+    events2 = env._build_current_events_for_students(action2)
+    assert any(e.get("actor") == "teacher" for e in events2)
+
+
+def test_prev_turn_identify_adhd_log_event_is_suppressed():
+    env = ClassroomV2(n_students=4, seed=7)
+    env.reset()
+    env.turn = 1
+    env.log.record(InteractionEvent(
+        class_id=env.class_id,
+        turn=1,
+        actor="teacher",
+        target=env.students[0].student_id,
+        event_type="teacher_identify",
+        action="identify_adhd",
+        content="score=0.85, reasoning text",
+    ))
+    env.turn = 2
+    action = TeacherAction(action_type="observe", student_id=None)
+    events = env._build_current_events_for_students(action)
+    # No identify_adhd event in the payload
+    for e in events:
+        assert e.get("action") != "identify_adhd"
+
+
+def test_public_teacher_actions_still_appear():
+    """Positive control: the public teacher actions must still
+    produce events after the suppression rule for identify_adhd
+    is in place."""
+    env = ClassroomV2(n_students=4, seed=7)
+    env.reset()
+    for action_type, expected in (
+        ("individual_intervention", "teacher intervened with student"),
+        ("private_correction", "teacher corrected student privately"),
+        ("public_correction", "teacher corrected student in front of class"),
+        ("class_instruction", "teacher addressed the class"),
+    ):
+        action = TeacherAction(
+            action_type=action_type,
+            student_id=env.students[0].student_id,
+            reasoning="internal reasoning with hypothesis=anxiety",
+        )
+        events = env._build_current_events_for_students(action)
+        teacher_events = [e for e in events if e.get("actor") == "teacher"]
+        assert len(teacher_events) == 1, f"no event for {action_type}"
+        assert teacher_events[0]["description"] == expected
+        assert "hypothesis" not in teacher_events[0]["description"]
+
+
 def test_event_wiring_is_deterministic_under_fixed_seed():
     def fingerprint():
         env = ClassroomV2(n_students=4, seed=99)
